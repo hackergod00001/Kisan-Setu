@@ -1,0 +1,14 @@
+# Dockerfile for building Lambda deployment packages
+# This ensures all dependencies are Linux-compatible
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install -r requirements.txt -t /asset-output
+
+# Copy application code
+COPY . /asset-output/
+
+# Set working directory
+WORKDIR /asset-output

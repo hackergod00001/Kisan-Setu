@@ -1,0 +1,11 @@
+{
+  "field_id": "test_field_001",
+  "gps_coords": [28.6139, 77.2090],
+  "ndvi_value": 0.3,
+  "maturity_stage": "early",
+  "timestamp": "2024-01-15T12:00:00Z",
+  "confidence": 0.92,
+  "satellite_image_url": "s3://kisan-setu-satellite/field_28.6139_77.2090_early.tif",
+  "crop_type": "onion",
+  "description": "Early growth stage - vegetation just starting to establish"
+}

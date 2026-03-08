@@ -1,0 +1,11 @@
+{
+  "field_id": "test_field_001",
+  "gps_coords": [28.6139, 77.2090],
+  "ndvi_value": 0.7,
+  "maturity_stage": "late",
+  "timestamp": "2024-03-15T12:00:00Z",
+  "confidence": 0.93,
+  "satellite_image_url": "s3://kisan-setu-satellite/field_28.6139_77.2090_late.tif",
+  "crop_type": "onion",
+  "description": "Late growth stage - approaching maturity"
+}

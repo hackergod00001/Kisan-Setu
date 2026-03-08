@@ -1,0 +1,51 @@
+# ============================================================================
+# Kisan Setu (किसान सेतु) — .gitignore
+# ============================================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---------- Virtual Environments ----------
+.venv/
+
+# ---------- Testing ----------
+.pytest_cache/
+.hypothesis/
+htmlcov/
+coverage.xml
+*.cover
+test-results/
+
+# ---------- Security / Quality Reports (CI artifacts) ----------
+*-report.json
+
+# ---------- AWS CDK ----------
+cdk.out/
+
+# ---------- Lambda Build Artifacts ----------
+# NOTE: Vendored pip packages (requests/, urllib3/, certifi/, etc.) inside
+# lambda/<function>/ are intentionally tracked — CDK Code.from_asset() needs
+# them at deploy time. Only the .build/ scratch directory is ignored.
+kisan-setu-mvp/lambda/**/.build/
+
+# ---------- IDE / Editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- macOS ----------
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---------- Kiro / Claude ----------
+.claude/
+
+# ---------- Misc ----------
+*.log
+*.tmp

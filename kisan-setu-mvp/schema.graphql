@@ -1,0 +1,108 @@
+# Kisan-Setu GraphQL Schema for Offline Sync
+# Supports offline-first data synchronization with conflict resolution
+
+type Farmer {
+  farmerId: ID!
+  name: String!
+  phone: String!
+  fpoId: ID!
+  gpsCoords: GpsCoordinates
+  preferredLanguage: String!
+  joinDate: AWSDateTime!
+  transactions: [Transaction]
+  creditScore: CreditScore
+}
+
+type GpsCoordinates {
+  latitude: Float!
+  longitude: Float!
+}
+
+type Transaction {
+  transactionId: ID!
+  farmerId: ID!
+  fpoId: ID!
+  quantity: Float!
+  cropType: String!
+  qualityGrade: String!
+  moisture: Float!
+  price: Float!
+  timestamp: AWSDateTime!
+  ledgerImageUrl: String
+  syncStatus: SyncStatus!
+  version: Int!
+}
+
+enum SyncStatus {
+  SYNCED
+  PENDING
+  CONFLICT
+}
+
+type CreditScore {
+  farmerId: ID!
+  totalScore: Float!
+  supplyConsistency: Float!
+  qualityMetrics: Float!
+  transactionHistory: Float!
+  financialBehavior: Float!
+  operationalTransparency: Float!
+  calculationDate: AWSDateTime!
+  scoreChange: Float
+}
+
+type SyncResult {
+  successCount: Int!
+  failureCount: Int!
+  conflicts: [ConflictInfo]
+}
+
+type ConflictInfo {
+  transactionId: ID!
+  localVersion: Int!
+  cloudVersion: Int!
+  resolution: String!
+}
+
+input TransactionInput {
+  transactionId: ID!
+  farmerId: ID!
+  fpoId: ID!
+  quantity: Float!
+  cropType: String!
+  qualityGrade: String!
+  moisture: Float!
+  price: Float!
+  timestamp: AWSDateTime!
+  ledgerImageUrl: String
+  syncStatus: SyncStatus!
+  version: Int!
+}
+
+type Query {
+  getFarmer(farmerId: ID!): Farmer
+  listTransactions(farmerId: ID!, limit: Int, nextToken: String): TransactionConnection
+  getCreditScore(farmerId: ID!): CreditScore
+  listFarmers(fpoId: ID!, limit: Int, nextToken: String): FarmerConnection
+}
+
+type TransactionConnection {
+  items: [Transaction]
+  nextToken: String
+}
+
+type FarmerConnection {
+  items: [Farmer]
+  nextToken: String
+}
+
+type Mutation {
+  createTransaction(input: TransactionInput!): Transaction
+  syncOfflineTransactions(transactions: [TransactionInput!]!): SyncResult
+  updateTransaction(transactionId: ID!, input: TransactionInput!): Transaction
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+}

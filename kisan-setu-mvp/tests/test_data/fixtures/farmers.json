@@ -1,0 +1,49 @@
+{
+  "farmers": [
+    {
+      "farmer_id": "test_farmer_001",
+      "name": "Ram Kumar",
+      "phone": "+919876543210",
+      "fpo_id": "test_fpo_001",
+      "gps_coords": [28.6139, 77.2090],
+      "preferred_language": "hi-IN",
+      "join_date": "2023-01-01"
+    },
+    {
+      "farmer_id": "test_farmer_002",
+      "name": "Suresh Patil",
+      "phone": "+919876543211",
+      "fpo_id": "test_fpo_001",
+      "gps_coords": [19.0760, 72.8777],
+      "preferred_language": "mr-IN",
+      "join_date": "2023-02-15"
+    },
+    {
+      "farmer_id": "test_farmer_003",
+      "name": "Murugan Rajan",
+      "phone": "+919876543212",
+      "fpo_id": "test_fpo_002",
+      "gps_coords": [13.0827, 80.2707],
+      "preferred_language": "ta-IN",
+      "join_date": "2023-03-20"
+    },
+    {
+      "farmer_id": "test_farmer_004",
+      "name": "Lakshmi Devi",
+      "phone": "+919876543213",
+      "fpo_id": "test_fpo_001",
+      "gps_coords": [28.7041, 77.1025],
+      "preferred_language": "hi-IN",
+      "join_date": "2023-04-10"
+    },
+    {
+      "farmer_id": "test_farmer_005",
+      "name": "Ganesh Deshmukh",
+      "phone": "+919876543214",
+      "fpo_id": "test_fpo_002",
+      "gps_coords": [18.5204, 73.8567],
+      "preferred_language": "mr-IN",
+      "join_date": "2023-05-05"
+    }
+  ]
+}

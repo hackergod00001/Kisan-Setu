@@ -1,0 +1,11 @@
+{
+  "field_id": "test_field_001",
+  "gps_coords": [28.6139, 77.2090],
+  "ndvi_value": 0.85,
+  "maturity_stage": "harvest_ready",
+  "timestamp": "2024-04-15T12:00:00Z",
+  "confidence": 0.96,
+  "satellite_image_url": "s3://kisan-setu-satellite/field_28.6139_77.2090_harvest.tif",
+  "crop_type": "onion",
+  "description": "Harvest ready stage - peak vegetation health"
+}

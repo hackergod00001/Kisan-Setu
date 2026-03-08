@@ -1,0 +1,28 @@
+{
+  "fpos": [
+    {
+      "fpo_id": "test_fpo_001",
+      "name": "Delhi Farmers Collective",
+      "location": "Delhi",
+      "manager_contact": "+919876543210",
+      "created_date": "2020-01-01",
+      "member_count": 150
+    },
+    {
+      "fpo_id": "test_fpo_002",
+      "name": "Maharashtra Krishi Sangh",
+      "location": "Pune",
+      "manager_contact": "+919876543220",
+      "created_date": "2019-06-15",
+      "member_count": 200
+    },
+    {
+      "fpo_id": "test_fpo_003",
+      "name": "Tamil Nadu Vivasayigal Sangam",
+      "location": "Chennai",
+      "manager_contact": "+919876543230",
+      "created_date": "2021-03-10",
+      "member_count": 120
+    }
+  ]
+}
