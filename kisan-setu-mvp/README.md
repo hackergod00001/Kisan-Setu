@@ -324,4 +324,4 @@ MIT
 
 **Upmanyu Jha** — Machine Learning Engineer
 
-Built for the AI for Bharat initiative.
+Built for the AI for Bharat 2026 initiative Powered by AWS.
