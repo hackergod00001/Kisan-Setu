@@ -15,83 +15,78 @@ The system is built entirely on AWS managed services (Lambda, DynamoDB, Bedrock,
 
 ## 2. High-Level System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              USER LAYER                                     │
-│                                                                             │
-│   WhatsApp Users                          FPO Admin Dashboard               │
-│   (Farmers, FPO Managers)                 (S3-hosted static site)           │
-│   Text / Voice / Image                    Leaflet map + Chart.js            │
-│         │                                        │                          │
-└─────────┼────────────────────────────────────────┼──────────────────────────┘
-          │                                        │
-          ▼                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            API LAYER                                        │
-│                                                                             │
-│   Amazon API Gateway (REST)              AWS AppSync (GraphQL)              │
-│   POST/GET /webhook                      Offline sync mutations/queries     │
-│   POST /process                          DynamoDB + Lambda resolvers        │
-│   POST /credit                                                              │
-│   POST /knowledge                                                           │
-│   Throttle: 100 req/s, burst 200                                            │
-└─────────┬────────────────────────────────────────┬──────────────────────────┘
-          │                                        │
-          ▼                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         COMPUTE LAYER (Lambda)                              │
-│                                                                             │
-│   MessageRouter ──┬──► DocumentProcessor (1024 MB, 60s)                     │
-│   (512 MB, 30s)   ├──► VoiceHandler (512 MB, 60s)                           │
-│                   └──► BedrockOrchestrator (1024 MB, 60s)                   │
-│                            ├──► CreditCalculator (512 MB, 30s)              │
-│                            ├──► SatelliteAnalyzer (1024 MB, 60s)            │
-│                            └──► KnowledgeBase (512 MB, 60s)                 │
-│                                                                             │
-│   SyncHandler (512 MB, 60s) — AppSync Lambda resolver                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         AI SERVICES LAYER                                   │
-│                                                                             │
-│   AWS Bedrock (Converse API)                                                │
-│   ┌─────────────────────────────────────────────────────────────┐           │
-│   │ 5-Model APAC Inference Profile Fallback Chain:              │           │
-│   │  1. Nova Pro  →  2. Nova Lite  →  3. Claude 3.7 Sonnet      │           │
-│   │  →  4. Claude 3.5 Sonnet v2  →  5. Claude 3 Haiku           │           │
-│   │                                                             │           │
-│   │ Multimodal Chain (image processing):                        │           │
-│   │  1. Claude 3.7 Sonnet  →  2. Claude 3.5 Sonnet v2           │           │
-│   │  →  3. Nova Pro  →  4. Claude 3 Haiku  →  5. Nova Lite      │           │
-│   └─────────────────────────────────────────────────────────────┘           │
-│                                                                             │
-│   Bedrock Knowledge Bases (RAG)    — FPO guidelines, crop data              │
-│   Bedrock Agent (UUQPVM0ULJ)      — Intent analysis, tool orchestration     │
-│   Amazon Textract (Queries API)    — Handwriting OCR fallback               │
-│   Amazon Transcribe                — Hindi/Marathi/Tamil STT                │
-│   Amazon Polly                     — Indian voice TTS                       │
-│   SageMaker Geospatial             — Sentinel-2 NDVI (+ mock fallback)      │
-└─────────────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           DATA LAYER                                        │
-│                                                                             │
-│   DynamoDB: KisanSetuData (Single Table Design, on-demand, GSI1)            │
-│   S3 Buckets: kisan-setu-raw-{acct}, kisan-setu-processed-{acct},           │
-│               kisan-setu-archive-{acct}, kisan-setu-dashboard-{acct}        │
-│   Secrets Manager: kisan-setu/whatsapp/credentials                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     MONITORING & SECURITY                                   │
-│                                                                             │
-│   CloudWatch Logs (all Lambdas)    SNS: kisan-setu-critical-alerts          │
-│   AppSync X-Ray tracing            AWS KMS (field-level encryption)         │
-│   IAM (shared Lambda role)         Secrets Manager (WhatsApp tokens)        │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph UserLayer["👤 User Layer"]
+        WA["📱 WhatsApp Users<br/>(Farmers, FPO Managers)<br/>Text / Voice / Image"]
+        DASH["📊 FPO Admin Dashboard<br/>(S3-hosted static site)<br/>Leaflet map + Chart.js"]
+    end
+
+    subgraph APILayer["🌐 API Layer"]
+        APIGW["Amazon API Gateway (REST)<br/>POST/GET /webhook<br/>POST /process, /credit, /knowledge<br/>Throttle: 100 req/s, burst 200"]
+        APPSYNC["AWS AppSync (GraphQL)<br/>Offline sync mutations/queries<br/>DynamoDB + Lambda resolvers"]
+    end
+
+    subgraph ComputeLayer["⚡ Compute Layer (Lambda)"]
+        ROUTER["MessageRouter<br/>512 MB · 30s"]
+        DOC["DocumentProcessor<br/>1024 MB · 60s"]
+        VOICE["VoiceHandler<br/>512 MB · 60s"]
+        ORCH["BedrockOrchestrator<br/>1024 MB · 60s"]
+        CREDIT["CreditCalculator<br/>512 MB · 30s"]
+        SAT["SatelliteAnalyzer<br/>1024 MB · 60s"]
+        KB["KnowledgeBase<br/>512 MB · 60s"]
+        SYNC["SyncHandler<br/>512 MB · 60s"]
+    end
+
+    subgraph AILayer["🤖 AI Services Layer"]
+        BEDROCK["AWS Bedrock (Converse API)<br/>5-Model APAC Fallback Chain"]
+        BKBASE["Bedrock Knowledge Bases (RAG)"]
+        BAGENT["Bedrock Agent"]
+        TEXTRACT["Amazon Textract (Queries API)"]
+        TRANSCRIBE["Amazon Transcribe"]
+        POLLY["Amazon Polly"]
+        SAGEMAKER["SageMaker Geospatial<br/>Sentinel-2 NDVI"]
+    end
+
+    subgraph DataLayer["💾 Data Layer"]
+        DDB["DynamoDB: KisanSetuData<br/>(Single Table, on-demand, GSI1)"]
+        S3["S3 Buckets: raw, processed,<br/>archive, dashboard"]
+        SECRETS["Secrets Manager<br/>WhatsApp credentials"]
+    end
+
+    subgraph MonitorLayer["🔒 Monitoring & Security"]
+        CW["CloudWatch Logs"]
+        SNS["SNS: kisan-setu-critical-alerts"]
+        KMS["AWS KMS (field encryption)"]
+        IAM["IAM (shared Lambda role)"]
+    end
+
+    WA --> APIGW
+    DASH --> S3
+    APIGW --> ROUTER
+    APPSYNC --> SYNC
+    ROUTER --> DOC
+    ROUTER --> VOICE
+    ROUTER --> ORCH
+    ORCH --> CREDIT
+    ORCH --> SAT
+    ORCH --> KB
+    DOC --> BEDROCK
+    DOC --> TEXTRACT
+    VOICE --> TRANSCRIBE
+    VOICE --> POLLY
+    ORCH --> BEDROCK
+    KB --> BKBASE
+    SAT --> SAGEMAKER
+    DOC --> DDB
+    ORCH --> DDB
+    CREDIT --> DDB
+    SAT --> DDB
+    SYNC --> DDB
+    DOC --> S3
+    VOICE --> S3
+    ComputeLayer --> CW
+    ComputeLayer --> SNS
 ```
 
 ---
@@ -112,138 +107,41 @@ kisan-setu-mvp/
 │
 ├── lambda/
 │   ├── common/                     # Shared modules (copied into each Lambda)
-│   │   ├── models.py               # Dataclasses: Message, LedgerData, NDVIResult,
-│   │   │                           #   YieldPrediction, ReliabilityScore, Transaction,
-│   │   │                           #   Farmer, FPO, AuditTrail
+│   │   ├── models.py               # Dataclasses: Message, LedgerData, NDVIResult, etc.
 │   │   ├── dynamodb_access.py      # DynamoDBAccess class — CRUD for all entities
 │   │   ├── validation.py           # GPS, phone, NDVI, crop, moisture validators
-│   │   ├── error_handling.py       # CircuitBreaker, retry_with_exponential_backoff,
-│   │   │                           #   CriticalErrorAlerter (SNS), localized errors,
-│   │   │                           #   batch resilience
-│   │   ├── llm_adapter.py          # LLMAdapter — 5-model fallback, circuit breakers,
-│   │   │                           #   Converse API, multimodal image support
-│   │   ├── cost_optimization.py    # CacheManager (DynamoDB-backed), TextractBatcher,
-│   │   │                           #   ConcurrentProcessor
+│   │   ├── error_handling.py       # CircuitBreaker, retry, CriticalErrorAlerter (SNS)
+│   │   ├── llm_adapter.py          # LLMAdapter — 5-model fallback, circuit breakers
+│   │   ├── cost_optimization.py    # CacheManager, TextractBatcher, ConcurrentProcessor
 │   │   ├── encryption.py           # EncryptionService — KMS + Fernet field encryption
 │   │   ├── ledger_formatter.py     # Multilingual ledger response formatting
 │   │   └── error_handler_example.py
 │   │
-│   ├── router/
-│   │   └── router.py               # MessageRouter Lambda handler
-│   │                                #   - Webhook verification (GET)
-│   │                                #   - Meta WhatsApp message parsing (POST)
-│   │                                #   - Routes to processor/voice/orchestrator
-│   │                                #   - Language detection (text heuristic)
-│   │
-│   ├── processor/
-│   │   ├── processor.py            # DocumentProcessor Lambda handler
-│   │   │                           #   - Multimodal LLM-first extraction
-│   │   │                           #   - Textract fallback for OCR
-│   │   │                           #   - Multi-entry ledger parsing
-│   │   │                           #   - Validation, aggregation, batch processing
-│   │   ├── meta_whatsapp_interface.py  # Local copy for Lambda packaging
-│   │   └── requirements.txt        # requests dependency
-│   │
-│   ├── orchestrator/
-│   │   ├── orchestrator.py         # BedrockOrchestrator Lambda handler
-│   │   │                           #   - ModelRouter (query classification + cost tracking)
-│   │   │                           #   - Intent detection (credit, satellite, ledger, etc.)
-│   │   │                           #   - Conversation context (DynamoDB history)
-│   │   │                           #   - Sub-Lambda invocation (credit, satellite, knowledge)
-│   │   │                           #   - Voice ledger creation from text
-│   │   │                           #   - 5-model APAC fallback via Converse API
-│   │   ├── meta_whatsapp_interface.py
-│   │   └── requirements.txt
-│   │
-│   ├── voice/
-│   │   ├── voice.py                # VoiceHandler Lambda handler
-│   │   │                           #   - Downloads audio from WhatsApp
-│   │   │                           #   - Uploads to S3, triggers transcription
-│   │   │                           #   - Sends transcribed text to orchestrator
-│   │   │                           #   - Returns TTS audio response
-│   │   ├── voice_agent.py          # VoiceAgent class
-│   │   │                           #   - Amazon Transcribe (async jobs with polling)
-│   │   │                           #   - Amazon Polly (neural TTS, Indian voices)
-│   │   │                           #   - Language detection from audio
-│   │   │                           #   - Audio format detection (ogg/mp3/wav/m4a)
-│   │   ├── meta_whatsapp_interface.py
-│   │   └── requirements.txt
-│   │
-│   ├── credit/
-│   │   └── credit.py               # CreditEngine + handler
-│   │                                #   5-component scoring (0-100):
-│   │                                #     Supply Consistency (30 pts)
-│   │                                #     Quality Metrics (25 pts)
-│   │                                #     Transaction History (20 pts)
-│   │                                #     Financial Behavior (15 pts)
-│   │                                #     Operational Transparency (10 pts)
-│   │                                #   - Score change notification (>10 pts)
-│   │                                #   - Historical score tracking
-│   │
-│   ├── satellite/
-│   │   ├── satellite_analyzer.py   # SatelliteAnalyzer + handler
-│   │   │                           #   - SageMaker Geospatial (Sentinel-2)
-│   │   │                           #   - NDVI calculation with confidence
-│   │   │                           #   - Yield prediction (maturity stages)
-│   │   │                           #   - DynamoDB caching (24h TTL)
-│   │   │                           #   - Bounding box generation from GPS
-│   │   └── satellite_mock.py       # SatelliteMock — deterministic NDVI for demo
-│   │                                #   Maharashtra bounds, 8 crop types
-│   │
-│   ├── knowledge/
-│   │   └── knowledge_base.py       # Bedrock Knowledge Base handler
-│   │                                #   - retrieve (vector search)
-│   │                                #   - retrieve_and_generate (RAG)
-│   │                                #   - FPO guidelines, farming practices,
-│   │                                #     quality standards, credit criteria
-│   │
-│   ├── sync/
-│   │   ├── sync_handler.py         # AppSync Lambda resolver
-│   │   │                           #   - syncOfflineTransactions mutation
-│   │   │                           #   - Last-write-wins conflict resolution
-│   │   │                           #   - Chronological ordering
-│   │   └── sync_manager.py         # SyncManager class
-│   │                                #   - SQLite local DB for offline storage
-│   │                                #   - Connectivity detection
-│   │                                #   - Batch upload with conflict resolution
-│   │                                #   - Retry with exponential backoff
-│   │
-│   └── whatsapp/
-│       ├── meta_whatsapp_interface.py  # MetaWhatsAppInterface class
-│       │                               #   - Secrets Manager credential loading
-│       │                               #   - Send text/voice/image/document
-│       │                               #   - Media download from WhatsApp
-│       │                               #   - Rate limit handling
-│       │                               #   - Structured data formatting
-│       └── webhook_handler.py          # Standalone webhook handler (alternative)
+│   ├── router/router.py            # MessageRouter Lambda handler
+│   ├── processor/processor.py      # DocumentProcessor Lambda handler
+│   ├── orchestrator/orchestrator.py # BedrockOrchestrator Lambda handler
+│   ├── voice/voice.py + voice_agent.py  # VoiceHandler Lambda
+│   ├── credit/credit.py            # CreditEngine + handler
+│   ├── satellite/satellite_analyzer.py + satellite_mock.py
+│   ├── knowledge/knowledge_base.py # Bedrock Knowledge Base handler
+│   ├── sync/sync_handler.py + sync_manager.py
+│   └── whatsapp/meta_whatsapp_interface.py + webhook_handler.py
 │
-├── dashboard/
-│   ├── index.html                  # S3-hosted FPO admin dashboard
-│   ├── app.js                      # Leaflet satellite map, Chart.js credit trends,
-│   │                               #   live message feed (polling), demo data
-│   └── bucket-policy.json
+├── dashboard/                      # S3-hosted FPO admin dashboard
+│   ├── index.html
+│   └── app.js
 │
 ├── tests/                          # 55+ test files
-│   ├── conftest.py                 # Fixtures, Hypothesis profiles (ci/dev/debug)
-│   ├── generators.py               # Hypothesis strategies for all domain models
-│   ├── mock_services.py            # MockServiceFactory for AWS services
-│   ├── test_message_routing_properties.py
-│   ├── test_ledger_extraction_properties.py
-│   ├── test_credit_engine.py
-│   ├── test_satellite_properties.py
-│   ├── test_voice_agent.py
-│   ├── test_sync_manager.py
-│   ├── ... (50+ property-based and unit test files)
-│   └── TESTING-GUIDE.md
+│   ├── conftest.py, generators.py, mock_services.py
+│   └── ... (property-based, unit, integration tests)
 │
 ├── docs/
 │   ├── demo_video_script.md
 │   └── presentation_outline.md
 │
-└── .github/workflows/
-    └── test.yml                    # CI/CD: unit, property, integration (LocalStack),
-                                    #   code quality (black/flake8/pylint), security (bandit/safety)
+└── .github/workflows/test.yml      # CI/CD pipeline
 ```
+
 
 ---
 
@@ -255,7 +153,7 @@ kisan-setu-mvp/
 |----------|-------|
 | Runtime | Python 3.11 |
 | Memory | 512 MB |
-| Timeout | 30s |
+n| Timeout | 30s |
 | Handler | `router.handler` |
 
 Entry point for all WhatsApp traffic. Responsibilities:
@@ -411,6 +309,7 @@ AppSync Lambda resolver for offline sync:
 - **Conflict resolution**: Last-write-wins (higher version number wins)
 - Reports: success count, failure count, conflict details with resolution
 
+
 ---
 
 ## 5. Shared Common Modules (`lambda/common/`)
@@ -435,15 +334,24 @@ Dataclasses matching the DynamoDB single-table design:
 
 The core AI resilience layer:
 
-- **Text fallback chain** (APAC inference profiles):
-  1. `apac.amazon.nova-pro-v1:0` (2 retries)
-  2. `apac.amazon.nova-lite-v1:0` (2 retries)
-  3. `apac.anthropic.claude-3-7-sonnet-20250219-v1:0` (1 retry)
-  4. `apac.anthropic.claude-3-5-sonnet-20241022-v2:0` (1 retry)
-  5. `apac.anthropic.claude-3-haiku-20240307-v1:0` (1 retry)
+```mermaid
+graph LR
+    subgraph TextChain["Text Fallback Chain (APAC Inference Profiles)"]
+        direction LR
+        T1["1. Nova Pro<br/>2 retries"] --> T2["2. Nova Lite<br/>2 retries"]
+        T2 --> T3["3. Claude 3.7 Sonnet<br/>1 retry"]
+        T3 --> T4["4. Claude 3.5 Sonnet v2<br/>1 retry"]
+        T4 --> T5["5. Claude 3 Haiku<br/>1 retry"]
+    end
 
-- **Multimodal fallback chain** (for image processing):
-  1. Claude 3.7 Sonnet → 2. Claude 3.5 Sonnet v2 → 3. Nova Pro → 4. Claude 3 Haiku → 5. Nova Lite
+    subgraph MultimodalChain["Multimodal Fallback Chain (Image Processing)"]
+        direction LR
+        M1["1. Claude 3.7 Sonnet"] --> M2["2. Claude 3.5 Sonnet v2"]
+        M2 --> M3["3. Nova Pro"]
+        M3 --> M4["4. Claude 3 Haiku"]
+        M4 --> M5["5. Nova Lite"]
+    end
+```
 
 - **Circuit breaker** per model: Opens after 3 failures, 60s timeout, half-open probe
 - **Exponential backoff**: 1s → 2s → 4s for retryable errors (throttling, timeout, 5xx)
@@ -499,6 +407,7 @@ Centralized data access layer with methods for all entities:
 - Suspicious price detection
 - Localized labels (Hindi, Marathi, Tamil, English)
 
+
 ---
 
 ## 6. Data Architecture
@@ -507,16 +416,73 @@ Centralized data access layer with methods for all entities:
 
 **Table**: `KisanSetuData` (on-demand billing, PK/SK key schema)
 
-| Entity | PK | SK | Notes |
-|--------|----|----|-------|
-| Farmer | `FARMER#{farmer_id}` | `METADATA` | Profile data |
-| Transaction | `FARMER#{farmer_id}` | `TXN#{timestamp}` | Sorted by time |
-| Credit Score | `FARMER#{farmer_id}` | `SCORE#{date}` | Historical scores |
-| FPO | `FPO#{fpo_id}` | `METADATA` | Organization data |
-| NDVI Result | `FIELD#{coords_hash}` | `NDVI#{timestamp}` | Satellite data |
-| Message | `MSG#{sender_id}` | `{timestamp}` | Conversation history |
-| Audit Trail | `AUDIT#{entity_type}#{entity_id}` | `{timestamp}` | Change log |
-| Pending Sync | `SYNC#{device_id}` | `{timestamp}` | Offline queue |
+```mermaid
+erDiagram
+    KisanSetuData {
+        string PK "Partition Key"
+        string SK "Sort Key"
+        string GSI1PK "GSI1 Partition Key (fpoId)"
+    }
+
+    FARMER {
+        string PK "FARMER#{farmer_id}"
+        string SK "METADATA"
+        string name
+        string phone
+        string fpo_id
+        string gps_coords
+        string preferred_language
+    }
+
+    TRANSACTION {
+        string PK "FARMER#{farmer_id}"
+        string SK "TXN#{timestamp}"
+        float quantity
+        string crop_type
+        string quality_grade
+    }
+
+    CREDIT_SCORE {
+        string PK "FARMER#{farmer_id}"
+        string SK "SCORE#{date}"
+        int total_score
+        json component_scores
+    }
+
+    FPO {
+        string PK "FPO#{fpo_id}"
+        string SK "METADATA"
+        string name
+        string location
+        int member_count
+    }
+
+    NDVI_RESULT {
+        string PK "FIELD#{coords_hash}"
+        string SK "NDVI#{timestamp}"
+        float ndvi_value
+        float confidence
+    }
+
+    MESSAGE {
+        string PK "MSG#{sender_id}"
+        string SK "timestamp"
+        string message_type
+        string content
+    }
+
+    AUDIT_TRAIL {
+        string PK "AUDIT#{entity_type}#{entity_id}"
+        string SK "timestamp"
+        string operation
+        json changed_fields
+    }
+
+    PENDING_SYNC {
+        string PK "SYNC#{device_id}"
+        string SK "timestamp"
+    }
+```
 
 **GSI1**: Partition key `fpoId` — enables "list farmers by FPO" queries
 
@@ -544,6 +510,7 @@ Mutations:
 - `updateTransaction(input)` — Optimistic concurrency (version match)
 - `syncOfflineTransactions(transactions)` — Lambda resolver (batch sync)
 
+
 ---
 
 ## 7. WhatsApp Integration
@@ -568,13 +535,52 @@ Capabilities:
 
 ### 7.3 Message Flow
 
+```mermaid
+sequenceDiagram
+    participant User as 📱 WhatsApp User
+    participant Meta as Meta Cloud API
+    participant APIGW as API Gateway
+    participant Router as MessageRouter
+    participant DocProc as DocumentProcessor
+    participant Voice as VoiceHandler
+    participant Orch as BedrockOrchestrator
+    participant AI as Bedrock / Textract / Transcribe
+    participant DB as DynamoDB
+    participant WA as WhatsApp (Response)
+
+    User->>Meta: Send message (text/image/audio)
+    Meta->>APIGW: POST /webhook
+    APIGW->>Router: Invoke
+
+    alt Image Message
+        Router->>DocProc: Async invoke
+        DocProc->>AI: LLM extraction (Bedrock Converse)
+        AI-->>DocProc: Structured ledger data
+        DocProc->>DB: Store LedgerData
+        DocProc->>WA: Send formatted response
+    else Audio Message
+        Router->>Voice: Async invoke
+        Voice->>AI: Transcribe audio (Amazon Transcribe)
+        AI-->>Voice: Transcribed text
+        Voice->>Orch: Forward text
+        Orch->>AI: Bedrock Converse API
+        AI-->>Orch: AI response
+        Orch-->>Voice: Response text
+        Voice->>AI: Synthesize speech (Amazon Polly)
+        AI-->>Voice: Audio file
+        Voice->>WA: Send audio response
+    else Text Message
+        Router->>Orch: Async invoke
+        Orch->>AI: Bedrock Converse API
+        AI-->>Orch: AI response
+        Orch->>DB: Store conversation
+        Orch->>WA: Send text response
+    end
+
+    WA->>Meta: Send response
+    Meta->>User: Deliver response
 ```
-WhatsApp User → Meta Cloud API → API Gateway (POST /webhook)
-    → MessageRouter Lambda
-        ├─ image → DocumentProcessor → LLM/Textract → DynamoDB → WhatsApp response
-        ├─ audio → VoiceHandler → Transcribe → Orchestrator → Polly → WhatsApp audio
-        └─ text  → Orchestrator → Bedrock/Credit/Satellite/KB → WhatsApp response
-```
+
 
 ---
 
@@ -618,10 +624,29 @@ Single shared Lambda execution role with:
 
 ### 9.1 Test Strategy
 
-- **Property-based testing** (Hypothesis): Core correctness properties for all domain logic
-- **Unit tests**: Individual function/class testing with mocks
-- **Integration tests**: LocalStack + DynamoDB Local for AWS service simulation
-- **E2E tests**: Complete workflow verification
+```mermaid
+graph TB
+    subgraph TestPyramid["🧪 Test Pyramid"]
+        PBT["Property-Based Tests (Hypothesis)<br/>Core correctness properties"]
+        UNIT["Unit Tests<br/>Individual function/class testing"]
+        INT["Integration Tests<br/>LocalStack + DynamoDB Local"]
+        E2E["E2E Tests<br/>Complete workflow verification"]
+    end
+
+    subgraph CICD["⚙️ CI/CD Pipeline (GitHub Actions)"]
+        J1["Job 1: Unit Tests<br/>pytest -n auto + coverage"]
+        J2["Job 2: Property Tests<br/>Hypothesis CI profile (100 examples)"]
+        J3["Job 3: Integration Tests<br/>LocalStack (DynamoDB, S3, Lambda, APIGW)"]
+        J4["Job 4: Code Quality<br/>black, isort, flake8, pylint"]
+        J5["Job 5: Security Scan<br/>bandit (SAST) + safety (deps)"]
+    end
+
+    J1 --> SUMMARY["Test Summary<br/>PR Comment"]
+    J2 --> SUMMARY
+    J3 --> SUMMARY
+    J4 --> SUMMARY
+    J5 --> SUMMARY
+```
 
 ### 9.2 Hypothesis Configuration
 
@@ -652,20 +677,20 @@ Hypothesis strategies for all domain types: GPS coordinates, phone numbers, tran
 - Mathematical calculation accuracy
 - Multi-script OCR properties
 
-### 9.5 CI/CD Pipeline (`.github/workflows/test.yml`)
-
-5 parallel jobs:
-1. **Unit Tests**: pytest with coverage, parallel execution (`-n auto`)
-2. **Property Tests**: Hypothesis CI profile (100 examples), 300s timeout
-3. **Integration Tests**: LocalStack (DynamoDB, S3, Lambda, API Gateway) + DynamoDB Local
-4. **Code Quality**: black, isort, flake8, pylint (non-blocking)
-5. **Security Scan**: bandit (code), safety (dependencies)
-
-Test summary job aggregates results and comments on PRs.
 
 ---
 
 ## 10. Resilience Patterns
+
+```mermaid
+graph LR
+    subgraph CircuitBreaker["Circuit Breaker Pattern"]
+        CLOSED["🟢 Closed<br/>(Normal)"] -->|"3 failures"| OPEN["🔴 Open<br/>(Reject all)"]
+        OPEN -->|"60s timeout"| HALFOPEN["🟡 Half-Open<br/>(Probe)"]
+        HALFOPEN -->|"Success"| CLOSED
+        HALFOPEN -->|"Failure"| OPEN
+    end
+```
 
 | Pattern | Implementation | Location |
 |---------|---------------|----------|
@@ -712,6 +737,22 @@ Test summary job aggregates results and comments on PRs.
 ---
 
 ## 13. Deployment
+
+```mermaid
+flowchart LR
+    DEV["👨‍💻 Developer"] -->|"git push"| GH["GitHub Actions<br/>5 parallel jobs"]
+    GH -->|"Tests pass"| CDK["AWS CDK<br/>(Python)"]
+    CDK -->|"cdk deploy"| AWS["☁️ AWS ap-south-1"]
+
+    subgraph Scripts["Deployment Scripts"]
+        S1["deploy.sh<br/>Full automated"]
+        S2["build_lambda_packages.sh<br/>Docker packaging"]
+        S3["deploy_meta_whatsapp.sh<br/>WhatsApp setup"]
+    end
+
+    DEV --> Scripts
+    Scripts --> CDK
+```
 
 - **Region**: ap-south-1 (Mumbai)
 - **IaC**: AWS CDK (Python), single stack

@@ -17,20 +17,17 @@ Kisan-Setu helps farmers through WhatsApp by:
 
 ## 🏗️ Architecture
 
-```
-WhatsApp User
-    ↓
-Meta WhatsApp Business API
-    ↓
-API Gateway → MessageRouter Lambda
-    ↓
-    ├─→ DocumentProcessor (Images/Ledgers)
-    ├─→ VoiceAgent (Voice Messages)
-    └─→ BedrockOrchestrator (Text Messages)
-         ↓
-         ├─→ KnowledgeBase (Agricultural Info)
-         ├─→ CreditCalculator (Credit Scoring)
-         └─→ SatelliteAnalyzer (Crop Health)
+```mermaid
+graph TB
+    WA["📱 WhatsApp User"] --> META["Meta WhatsApp Business API"]
+    META --> APIGW["API Gateway"]
+    APIGW --> ROUTER["MessageRouter Lambda"]
+    ROUTER --> DOC["📄 DocumentProcessor<br/>(Images/Ledgers)"]
+    ROUTER --> VOICE["🎤 VoiceAgent<br/>(Voice Messages)"]
+    ROUTER --> ORCH["🤖 BedrockOrchestrator<br/>(Text Messages)"]
+    ORCH --> KB["📚 KnowledgeBase<br/>(Agricultural Info)"]
+    ORCH --> CREDIT["💳 CreditCalculator<br/>(Credit Scoring)"]
+    ORCH --> SAT["🛰️ SatelliteAnalyzer<br/>(Crop Health)"]
 ```
 
 ---
