@@ -1,5 +1,3 @@
-<![CDATA[<div align="center">
-
 # 🌾 Kisan-Setu (किसान सेतु)
 
 ### An Agentic FPO Operating System
@@ -327,4 +325,3 @@ MIT
 **Upmanyu Jha** — Machine Learning Engineer
 
 Built for the AI for Bharat initiative.
-]]>
