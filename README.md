@@ -39,7 +39,7 @@ API Gateway → MessageRouter Lambda
 
 - AWS Account (Account ID: 682366718780, Region: ap-south-1)
 - Meta WhatsApp Business Account
-- Python 3.9+
+- Python 3.11+
 - Node.js 20+ (for AWS CDK)
 - AWS CLI configured
 

@@ -251,12 +251,12 @@ kisan-setu-mvp/
 
 ### 4.1 MessageRouter (`lambda/router/router.py`)
 
-| Property | Value |
-|----------|-------|
-| Runtime | Python 3.11 |
-| Memory | 512 MB |
-| Timeout | 30s |
-| Handler | `router.handler` |
+| Property | Value            |
+|----------|------------------|
+| Runtime  | Python 3.11      |
+| Memory   | 512 MB           |
+| Timeout  | 30s              |
+| Handler  | `router.handler` |
 
 Entry point for all WhatsApp traffic. Responsibilities:
 
@@ -273,11 +273,11 @@ Entry point for all WhatsApp traffic. Responsibilities:
 ### 4.2 DocumentProcessor (`lambda/processor/processor.py`)
 
 | Property | Value |
-|----------|-------|
-| Runtime | Python 3.11 |
-| Memory | 1024 MB |
-| Timeout | 60s |
-| Handler | `processor.handler` |
+|----------|---------------------|
+| Runtime  | Python 3.11         |
+| Memory   | 1024 MB             |
+| Timeout  | 60s                 |
+| Handler  | `processor.handler` |
 
 Processes handwritten ledger images. Key design decision: **multimodal LLM-first with Textract fallback**.
 
@@ -294,11 +294,11 @@ Processes handwritten ledger images. Key design decision: **multimodal LLM-first
 ### 4.3 BedrockOrchestrator (`lambda/orchestrator/orchestrator.py`)
 
 | Property | Value |
-|----------|-------|
-| Runtime | Python 3.11 |
-| Memory | 1024 MB |
-| Timeout | 60s |
-| Handler | `orchestrator.handler` |
+|----------|------------------------|
+| Runtime  | Python 3.11.           |
+| Memory   | 1024 MB                |
+| Timeout  | 60s                    |
+| Handler  | `orchestrator.handler` |
 
 Central AI brain. Handles all text-based interactions.
 
