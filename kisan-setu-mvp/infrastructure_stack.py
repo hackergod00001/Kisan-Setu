@@ -168,10 +168,11 @@ class KisanSetuMVPStack(Stack):
                 "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
                 "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
                 "REGION": region,
-                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
             }
         )
-        
+
         # Voice Handler Lambda
         voice_lambda = lambda_.Function(
             self, "VoiceHandler",
@@ -187,10 +188,11 @@ class KisanSetuMVPStack(Stack):
                 "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
                 "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
                 "REGION": region,
-                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
             }
         )
-        
+
         # Credit Calculator Lambda
         credit_lambda = lambda_.Function(
             self, "CreditCalculator",
@@ -202,10 +204,11 @@ class KisanSetuMVPStack(Stack):
             memory_size=512,
             environment={
                 "DYNAMODB_TABLE": "KisanSetuData",
-                "REGION": region
+                "REGION": region,
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
             }
         )
-        
+
         # Satellite Analyzer Lambda
         satellite_lambda = lambda_.Function(
             self, "SatelliteAnalyzer",
@@ -258,10 +261,11 @@ class KisanSetuMVPStack(Stack):
                 "SATELLITE_ANALYZER_FUNCTION": satellite_lambda.function_name,
                 "CREDIT_CALCULATOR_FUNCTION": credit_lambda.function_name,
                 "KNOWLEDGE_BASE_FUNCTION": knowledge_lambda.function_name,
-                "KNOWLEDGE_BASE_ID": ""  # Will be set after running setup_knowledge_base.py
+                "KNOWLEDGE_BASE_ID": "",  # Will be set after running setup_knowledge_base.py
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
             }
         )
-        
+
         # Message Router Lambda
         router_lambda = lambda_.Function(
             self, "MessageRouter",
@@ -287,7 +291,7 @@ class KisanSetuMVPStack(Stack):
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
             }
         )
-        
+
         # API Gateway
         api = apigw.RestApi(
             self, "KisanSetuAPI",

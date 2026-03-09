@@ -1,3 +1,5 @@
+> **Note:** This is a historical spec document representing the original design intent. The implementation evolved beyond this spec. See `kisan-setu-mvp/README.md` for current architecture, including the 5-model APAC inference profile fallback chain and live FPO admin dashboard.
+
 # Kisan-Setu - Executive Summary
 
 ## Quick Overview

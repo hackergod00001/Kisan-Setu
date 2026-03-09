@@ -46,6 +46,12 @@ kisan-setu-mvp/lambda/**/.build/
 # ---------- Kiro / Claude ----------
 .claude/
 
+# ---------- Internal / Personal Dev Docs ----------
+Go_to_task.md
+IMPLEMENTATION_STATUS_AND_TASKS.md
+personal_go_to_task.md
+kisan-setu-mvp/docs/
+
 # ---------- Misc ----------
 *.log
 *.tmp

@@ -118,10 +118,38 @@ Processing your request...""",
                 
                 response_text = response_messages.get(language, response_messages['en'])
                 success = whatsapp.send_text_response(sender_id, response_text, language)
-                
+
                 if not success:
                     logger.warning(f"Failed to send WhatsApp response to {sender_id}")
-            
+
+            # Forward transcribed text to orchestrator for processing
+            orchestrator_function = event.get('orchestrator_function') or os.environ.get('BEDROCK_ORCHESTRATOR_FUNCTION')
+            if orchestrator_function and sender_id and result.text.strip():
+                try:
+                    import boto3 as _boto3
+                    _lambda_client = _boto3.client('lambda', region_name=REGION)
+                    # Use detected language for the orchestrator response
+                    detected_lang = result.detected_language if result.detected_language else language
+                    # Map Transcribe locale codes back to our app codes
+                    lang_map = {'en-IN': 'en', 'en-US': 'en', 'en-GB': 'en',
+                                'hi-IN': 'hi-IN', 'mr-IN': 'mr-IN', 'ta-IN': 'ta-IN'}
+                    app_lang = lang_map.get(detected_lang, 'en')
+
+                    logger.info(f"Forwarding transcribed text to orchestrator: '{result.text}' (lang={app_lang})")
+                    _lambda_client.invoke(
+                        FunctionName=orchestrator_function,
+                        InvocationType='Event',  # Async so we don't block
+                        Payload=json.dumps({
+                            'sender_id': sender_id,
+                            'message_text': result.text,
+                            'message_id': event.get('message_id', ''),
+                            'language': app_lang
+                        }).encode('utf-8')
+                    )
+                    logger.info("Orchestrator invoked successfully for voice transcription")
+                except Exception as fwd_err:
+                    logger.error(f"Failed to forward to orchestrator: {fwd_err}")
+
             return {
                 'statusCode': 200,
                 'body': json.dumps({
@@ -201,9 +229,9 @@ Processing your request...""",
                 language = event.get('language', 'en')
                 error_msg = error_messages.get(language, error_messages['en'])
                 whatsapp.send_text_response(sender_id, error_msg, language)
-        except:
-            pass
-        
+        except Exception as notify_err:
+            logger.error(f"Failed to send validation error notification: {notify_err}")
+
         return {
             'statusCode': 400,
             'body': json.dumps({
@@ -230,9 +258,9 @@ Processing your request...""",
                 language = event.get('language', 'en')
                 error_msg = error_messages.get(language, error_messages['en'])
                 whatsapp.send_text_response(sender_id, error_msg, language)
-        except:
-            pass
-        
+        except Exception as notify_err:
+            logger.error(f"Failed to send service error notification: {notify_err}")
+
         return {
             'statusCode': 500,
             'body': json.dumps({
@@ -259,9 +287,9 @@ Processing your request...""",
                 language = event.get('language', 'en')
                 error_msg = error_messages.get(language, error_messages['en'])
                 whatsapp.send_text_response(sender_id, error_msg, language)
-        except:
-            pass
-        
+        except Exception as notify_err:
+            logger.error(f"Failed to send unexpected error notification: {notify_err}")
+
         return {
             'statusCode': 500,
             'body': json.dumps({

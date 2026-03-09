@@ -1,3 +1,5 @@
+> **Note:** This is a historical spec document representing the original design intent. The implementation evolved beyond this spec — notably using a 5-model APAC inference profile fallback chain (Nova Pro → Nova Lite → Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Claude 3 Haiku), multimodal LLM-first document processing with Textract fallback, and a live S3-hosted FPO admin dashboard. See `kisan-setu-mvp/README.md` for current architecture.
+
 # Requirements Document: Kisan-Setu
 
 ## Introduction

@@ -2,7 +2,9 @@
 
 ## Overview
 
-The Bedrock Orchestration Component uses AWS Bedrock Agents with Claude 3.5 Sonnet v2 to orchestrate complex multi-step requests, decompose tasks, invoke appropriate tools, and maintain conversation context.
+The Bedrock Orchestration Component uses the LLM Adapter with a 5-model APAC inference profile fallback chain to orchestrate complex multi-step requests, decompose tasks, invoke appropriate tools, and maintain conversation context.
+
+The text model fallback chain is: Nova Pro → Nova Lite → Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Claude 3 Haiku (all via APAC inference profiles). For multimodal (image) processing: Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Nova Pro → Claude 3 Haiku → Nova Lite. Each model has a circuit breaker (3 failures → 60s cooldown) and exponential backoff retries.
 
 ## Features
 
@@ -267,8 +269,13 @@ Attributes:
 
 The orchestrator integrates with AWS Bedrock Agent configured with:
 
-- **Foundation Model**: Claude 3.5 Sonnet v2 (anthropic.claude-3-5-sonnet-20241022-v2:0)
-- **Agent ID**: UUQPVM0ULJ
+- **LLM Adapter**: 5-model APAC inference profile fallback chain via Converse API
+  - Tier 1: Amazon Nova Pro (`apac.amazon.nova-pro-v1:0`)
+  - Tier 2: Amazon Nova Lite (`apac.amazon.nova-lite-v1:0`)
+  - Tier 3: Claude 3.7 Sonnet (`apac.anthropic.claude-3-7-sonnet-20250219-v1:0`)
+  - Tier 4: Claude 3.5 Sonnet v2 (`apac.anthropic.claude-3-5-sonnet-20241022-v2:0`)
+  - Tier 5: Claude 3 Haiku (`apac.anthropic.claude-3-haiku-20240307-v1:0`)
+- **Agent ID**: UUQPVM0ULJ (optional — system falls back to direct model calls if agent unavailable)
 - **Alias ID**: A2TGFPMFXZ
 - **Action Groups**: Document processing, satellite analysis, voice processing
 

@@ -165,11 +165,17 @@ curl "YOUR_WEBHOOK_URL?hub.mode=subscribe&hub.verify_token=kisan-setu-verify-202
 
 **Solution**:
 1. Go to AWS Console → Bedrock → Model access
-2. Request access to:
-   - Claude 3.5 Sonnet v2
+2. Request access to all models in the fallback chain:
+   - Amazon Nova Pro
+   - Amazon Nova Lite
+   - Claude 3.7 Sonnet (APAC inference profile)
+   - Claude 3.5 Sonnet v2 (APAC inference profile)
+   - Claude 3 Haiku (APAC inference profile)
    - Titan Embeddings G1 - Text
 3. Wait for approval (5-30 minutes)
 4. Check email for approval notification
+
+**Note**: The system uses a 5-model fallback chain. If only some models are enabled, the system will skip unavailable models and try the next one. But for best reliability, enable all 5.
 
 ---
 

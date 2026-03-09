@@ -777,10 +777,33 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             raise ValueError(f"Unknown action: {action}")
     
     except Exception as e:
-        print(f"Error in satellite analysis: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
+        print(f"SatelliteAnalyzer failed: {str(e)}, falling back to mock data")
+
+        # Fall back to SatelliteMock for realistic demo data
+        try:
+            from satellite_mock import SatelliteMock
+            mock = SatelliteMock()
+            mock_data = mock.get_ndvi_data(gps_coords[0], gps_coords[1])
+
+            if mock_data:
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'status': 'success',
+                        'action': action,
+                        'ndvi_value': mock_data['ndvi_value'],
+                        'crop_type': mock_data['crop_type'],
+                        'maturity_stage': mock_data['maturity_stage'],
+                        'health_status': mock_data['health_status'],
+                        'estimated_yield': mock_data['estimated_yield'],
+                        'coordinates': mock_data['coordinates'],
+                        'data_source': 'mock_fallback',
+                        'generated_at': mock_data['generated_at']
+                    })
+                }
+        except Exception as mock_err:
+            print(f"Mock fallback also failed: {mock_err}")
+
         return {
             'statusCode': 500,
             'body': json.dumps({
