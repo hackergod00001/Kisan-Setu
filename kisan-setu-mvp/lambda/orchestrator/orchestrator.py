@@ -571,8 +571,22 @@ class BedrockOrchestrator:
             return 'credit'
 
         # Satellite / crop health intent
-        satellite_keywords = ['crop health', 'satellite', 'ndvi', 'field health',
-                              'fasal swasthya', 'khet ki halat', 'remote sensing']
+        satellite_keywords = [
+            # English
+            'crop health', 'satellite', 'ndvi', 'field health', 'remote sensing',
+            'crop status', 'field status', 'crop condition', 'field condition',
+            # Hindi (transliterated)
+            'fasal swasthya', 'khet ki halat', 'khet ki sthiti', 'fasal ki halat',
+            'upgreh', 'satellite data',
+            # Hindi (Devanagari)
+            'फसल स्वास्थ्य', 'खेत की हालत', 'खेत की स्थिति', 'फसल की हालत',
+            'उपग्रह', 'फसल कैसी है', 'खेत कैसा है', 'फसल की जानकारी',
+            # Marathi
+            'पीक आरोग्य', 'शेताची स्थिती', 'पीक कसे आहे', 'शेत कसे आहे',
+            'उपग्रह माहिती', 'पीक स्थिती',
+            # Tamil
+            'பயிர் நிலை', 'வயல் நிலை', 'பயிர் ஆரோக்கியம்', 'செயற்கைக்கோள்',
+        ]
         if any(kw in msg_lower for kw in satellite_keywords):
             return 'satellite'
 
@@ -730,7 +744,9 @@ class BedrockOrchestrator:
 
             print(f"Invoking SatelliteAnalyzer for ({lat}, {lon})")
             result = self.invoke_tool('satellite_analyzer', {
-                'gps_coordinates': [lat, lon],
+                'action': 'predict_yield',
+                'gps_coords': [lat, lon],
+                'crop_type': 'onion',
                 'farmer_id': sender_id
             })
 
@@ -744,12 +760,53 @@ class BedrockOrchestrator:
                 if isinstance(body, str):
                     body = json.loads(body)
 
-                report = "SATELLITE CROP HEALTH DATA:\n"
-                report += f"NDVI Value: {body.get('ndvi_value', 'N/A')}\n"
-                report += f"Health Status: {body.get('health_status', 'N/A')}\n"
-                report += f"Crop Type: {body.get('crop_type', 'N/A')}\n"
-                report += f"Maturity Stage: {body.get('maturity_stage', 'N/A')}\n"
-                report += f"Estimated Yield: {body.get('estimated_yield', 'N/A')}\n"
+                # Handle both mock format (health_status) and live format
+                health = body.get('health_status')
+                stage = body.get('maturity_stage', '')
+                if not health:
+                    stage_map = {'early': 'Growing', 'mid': 'Moderate', 'late': 'Healthy', 'harvest_ready': 'Harvest Ready'}
+                    health = stage_map.get(stage, stage or 'N/A')
+
+                crop = body.get('crop_type', 'N/A')
+                ndvi = body.get('ndvi_value', 'N/A')
+
+                # Convert tons/hectare to quintals/acre (1 ton/ha ≈ 4 quintals/acre)
+                yield_val = body.get('estimated_yield') or body.get('estimated_volume')
+                yield_str = ""
+                ci_str = ""
+                if yield_val is not None and isinstance(yield_val, (int, float)):
+                    quintals = yield_val * 4
+                    yield_str = f"{quintals:.0f} quintals/acre (approx. {yield_val:.1f} tons/hectare)"
+                elif yield_val is not None:
+                    yield_str = str(yield_val)
+
+                if body.get('confidence_interval'):
+                    ci = body['confidence_interval']
+                    ci_low = ci[0] * 4
+                    ci_high = ci[1] * 4
+                    ci_str = f"{ci_low:.0f}-{ci_high:.0f} quintals/acre"
+
+                # Maturity stage → farmer-friendly description
+                stage_desc_map = {
+                    'early': 'Your crop is still in the early growth phase.',
+                    'mid': 'Your crop is growing well and is in mid-season.',
+                    'late': 'Your crop is mature and nearing harvest time.',
+                    'harvest_ready': 'Your crop is ready for harvest!'
+                }
+                stage_desc = stage_desc_map.get(stage, '')
+
+                report = (
+                    f"SATELLITE CROP HEALTH REPORT\n"
+                    f"Crop: {crop}\n"
+                    f"Health: {health}\n"
+                    f"Growth Stage: {stage} — {stage_desc}\n"
+                    f"NDVI (vegetation index): {ndvi}\n"
+                )
+                if yield_str:
+                    report += f"Expected Yield: {yield_str}\n"
+                if ci_str:
+                    report += f"Yield Range: {ci_str}\n"
+
                 return report
 
             return None
@@ -1079,7 +1136,18 @@ class BedrockOrchestrator:
             elif intent == 'satellite':
                 satellite_data = self._invoke_satellite_analyzer(sender_id)
                 if satellite_data:
-                    tool_context = f"\n\n[SYSTEM DATA - Use this data to answer the farmer's query:\n{satellite_data}]\n"
+                    tool_context = (
+                        f"\n\n[SYSTEM DATA - Satellite crop health results for this farmer's field:\n"
+                        f"{satellite_data}\n"
+                        f"FORMATTING INSTRUCTIONS:\n"
+                        f"- Present this as a warm, conversational crop update — like a trusted advisor visiting their field\n"
+                        f"- Use WhatsApp formatting: *bold* for labels, no markdown headers (# or ###)\n"
+                        f"- Use quintals/acre (not tons/hectare) as Indian farmers understand this unit\n"
+                        f"- Give 2-3 practical next-step tips based on the growth stage\n"
+                        f"- Keep it under 200 words, use bullet points (•) for tips\n"
+                        f"- Do NOT use technical jargon like 'NDVI' — say 'vegetation health index' or skip it\n"
+                        f"- End with an encouraging line]\n"
+                    )
                     actions_taken.append('satellite_analyzer:success')
                 else:
                     tool_context = (
