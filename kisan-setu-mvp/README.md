@@ -79,38 +79,26 @@ Responsive web dashboard hosted on S3 with:
 
 ## Architecture
 
-```
-WhatsApp (Meta Business API)
-        │
-        ▼
-   API Gateway ──► Lambda Router
-        │              │
-        │    ┌─────────┼──────────┬──────────────┐
-        │    ▼         ▼          ▼              ▼
-        │  Images    Voice      Text          Location
-        │    │         │          │              │
-        │    ▼         ▼          ▼              ▼
-        │ Document   Voice    Bedrock        Satellite
-        │ Processor  Handler  Orchestrator   Analyzer
-        │ (Textract  (Transcribe (Converse   (SageMaker
-        │  + LLM)    + Polly)    API)        Geospatial)
-        │    │         │          │              │
-        │    └─────────┴──────┬───┴──────────────┘
-        │                     ▼
-        │              DynamoDB (Single Table)
-        │                     │
-        │    ┌────────────────┼────────────────┐
-        │    ▼                ▼                ▼
-        │  Credit          Knowledge        AppSync
-        │  Calculator      Base (RAG)       (Offline Sync)
-        │    │                │                │
-        │    ▼                ▼                ▼
-        │  Reliability     Bedrock KB       GraphQL API
-        │  Scores          Retrieve &       + Tablet App
-        │                  Generate
-        │
-        ▼
-   S3 Dashboard ──► FPO Admin Panel
+```mermaid
+graph TB
+    WA["📱 WhatsApp (Meta Business API)"] --> APIGW["API Gateway"]
+    APIGW --> ROUTER["Lambda Router"]
+
+    ROUTER -->|Images| DOC["Document Processor<br/>(Textract + LLM)"]
+    ROUTER -->|Voice| VOICE["Voice Handler<br/>(Transcribe + Polly)"]
+    ROUTER -->|Text| ORCH["Bedrock Orchestrator<br/>(Converse API)"]
+    ROUTER -->|Location| SAT["Satellite Analyzer<br/>(SageMaker Geospatial)"]
+
+    DOC --> DDB["DynamoDB (Single Table)"]
+    VOICE --> DDB
+    ORCH --> DDB
+    SAT --> DDB
+
+    DDB --> CREDIT["Credit Calculator<br/>→ Reliability Scores"]
+    DDB --> KB["Knowledge Base (RAG)<br/>→ Bedrock KB Retrieve & Generate"]
+    DDB --> APPSYNC["AppSync (Offline Sync)<br/>→ GraphQL API + Tablet App"]
+
+    S3DASH["S3 Dashboard"] --> ADMIN["📊 FPO Admin Panel"]
 ```
 
 ### Lambda Functions (9 total)
