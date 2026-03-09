@@ -416,72 +416,31 @@ Centralized data access layer with methods for all entities:
 
 **Table**: `KisanSetuData` (on-demand billing, PK/SK key schema)
 
+| Entity | PK | SK | Key Attributes |
+|--------|----|----|----------------|
+| Farmer | `FARMER#{farmer_id}` | `METADATA` | name, phone, fpo_id, gps_coords, preferred_language |
+| Transaction | `FARMER#{farmer_id}` | `TXN#{timestamp}` | quantity, crop_type, quality_grade |
+| Credit Score | `FARMER#{farmer_id}` | `SCORE#{date}` | total_score, component_scores |
+| FPO | `FPO#{fpo_id}` | `METADATA` | name, location, member_count |
+| NDVI Result | `FIELD#{coords_hash}` | `NDVI#{timestamp}` | ndvi_value, confidence |
+| Message | `MSG#{sender_id}` | `{timestamp}` | message_type, content |
+| Audit Trail | `AUDIT#{entity_type}#{entity_id}` | `{timestamp}` | operation, changed_fields |
+| Pending Sync | `SYNC#{device_id}` | `{timestamp}` | — |
+
 ```mermaid
-erDiagram
-    KisanSetuData {
-        string PK "Partition Key"
-        string SK "Sort Key"
-        string GSI1PK "GSI1 Partition Key (fpoId)"
-    }
+graph LR
+    subgraph DynamoDB["KisanSetuData (Single Table)"]
+        direction TB
+        F["FARMER#id → METADATA<br/>FARMER#id → TXN#ts<br/>FARMER#id → SCORE#date"]
+        FPO_E["FPO#id → METADATA"]
+        FIELD["FIELD#hash → NDVI#ts"]
+        MSG["MSG#sender → timestamp"]
+        AUDIT["AUDIT#type#id → timestamp"]
+        SYNC_E["SYNC#device → timestamp"]
+    end
 
-    FARMER {
-        string PK "FARMER#{farmer_id}"
-        string SK "METADATA"
-        string name
-        string phone
-        string fpo_id
-        string gps_coords
-        string preferred_language
-    }
-
-    TRANSACTION {
-        string PK "FARMER#{farmer_id}"
-        string SK "TXN#{timestamp}"
-        float quantity
-        string crop_type
-        string quality_grade
-    }
-
-    CREDIT_SCORE {
-        string PK "FARMER#{farmer_id}"
-        string SK "SCORE#{date}"
-        int total_score
-        json component_scores
-    }
-
-    FPO {
-        string PK "FPO#{fpo_id}"
-        string SK "METADATA"
-        string name
-        string location
-        int member_count
-    }
-
-    NDVI_RESULT {
-        string PK "FIELD#{coords_hash}"
-        string SK "NDVI#{timestamp}"
-        float ndvi_value
-        float confidence
-    }
-
-    MESSAGE {
-        string PK "MSG#{sender_id}"
-        string SK "timestamp"
-        string message_type
-        string content
-    }
-
-    AUDIT_TRAIL {
-        string PK "AUDIT#{entity_type}#{entity_id}"
-        string SK "timestamp"
-        string operation
-        json changed_fields
-    }
-
-    PENDING_SYNC {
-        string PK "SYNC#{device_id}"
-        string SK "timestamp"
-    }
+    GSI["GSI1: fpoId → list farmers by FPO"]
+    DynamoDB --> GSI
 ```
 
 **GSI1**: Partition key `fpoId` — enables "list farmers by FPO" queries
