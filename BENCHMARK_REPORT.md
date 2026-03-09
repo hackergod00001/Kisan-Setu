@@ -427,4 +427,4 @@ The system's 5-model LLM fallback chain, property-based test suite (633 tests, 1
 
 ---
 
-*Report generated from codebase audit of Kisan-Setu MVP. All performance numbers are estimates based on AWS service documentation and architecture analysis. For production benchmarks, deploy and measure with CloudWatch.*
+*Report generated from codebase audit of Kisan-Setu MVP deployed in dev environment. All performance numbers are estimates based on AWS service documentation and architecture analysis. For production benchmarks, deploy in production and measure with CloudWatch.*
