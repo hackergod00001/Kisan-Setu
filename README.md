@@ -1,17 +1,21 @@
-# Kisan-Setu MVP - WhatsApp-Based Agricultural Assistant
+# 🌾 Kisan-Setu MVP — WhatsApp-Based Agricultural Assistant
 
-AI-powered WhatsApp assistant for Indian farmers using AWS Bedrock, Meta WhatsApp Business API, and serverless architecture.
+AI-powered WhatsApp assistant for Indian farmers and FPOs using AWS Bedrock, Meta WhatsApp Business API, and serverless architecture.
+
+> For the full architecture deep-dive, see [`architecture.md`](architecture.md)
 
 ---
 
 ## 🎯 Overview
 
 Kisan-Setu helps farmers through WhatsApp by:
-- Processing ledger images with OCR (AWS Textract)
-- Providing agricultural advice via AI (AWS Bedrock)
-- Calculating credit scores based on transaction history
-- Analyzing satellite imagery for crop health (SageMaker Geospatial)
-- Supporting voice messages in Hindi and regional languages
+- Processing handwritten ledger images with multimodal LLM + Textract OCR
+- Providing agricultural advice via AI (AWS Bedrock, 5-model fallback chain)
+- Calculating credit scores (0–100) based on transaction history
+- Analyzing satellite imagery for crop health (SageMaker Geospatial, NDVI)
+- Supporting voice messages in Hindi, Marathi, and Tamil
+- Offline-first sync for FPO managers (AppSync + GraphQL)
+- FPO Admin Dashboard (S3-hosted: live feed, credit charts, NDVI map)
 
 ---
 
@@ -19,26 +23,64 @@ Kisan-Setu helps farmers through WhatsApp by:
 
 ```mermaid
 graph TB
-    WA["📱 WhatsApp User"] --> META["Meta WhatsApp Business API"]
-    META --> APIGW["API Gateway"]
-    APIGW --> ROUTER["MessageRouter Lambda"]
-    ROUTER --> DOC["📄 DocumentProcessor<br/>(Images/Ledgers)"]
-    ROUTER --> VOICE["🎤 VoiceAgent<br/>(Voice Messages)"]
-    ROUTER --> ORCH["🤖 BedrockOrchestrator<br/>(Text Messages)"]
-    ORCH --> KB["📚 KnowledgeBase<br/>(Agricultural Info)"]
-    ORCH --> CREDIT["💳 CreditCalculator<br/>(Credit Scoring)"]
-    ORCH --> SAT["🛰️ SatelliteAnalyzer<br/>(Crop Health)"]
+    subgraph Users["👤 Users"]
+        WA["📱 WhatsApp<br/>(Farmers, FPO Managers)"]
+        DASH["📊 FPO Admin Dashboard<br/>(S3 static site)"]
+    end
+
+    subgraph API["🌐 API Layer"]
+        APIGW["API Gateway<br/>REST · 100 req/s"]
+        APPSYNC["AppSync<br/>GraphQL · Offline Sync"]
+    end
+
+    subgraph Compute["⚡ Lambda Functions (Python 3.11)"]
+        ROUTER["MessageRouter<br/>512 MB · 30s"]
+        DOC["📄 DocumentProcessor<br/>1024 MB · 60s"]
+        VOICE["🎤 VoiceHandler<br/>512 MB · 60s"]
+        ORCH["🤖 BedrockOrchestrator<br/>1024 MB · 60s"]
+        CREDIT["💳 CreditCalculator<br/>512 MB · 30s"]
+        SAT["🛰️ SatelliteAnalyzer<br/>1024 MB · 60s"]
+        KB["📚 KnowledgeBase<br/>512 MB · 60s"]
+        SYNC["🔄 SyncHandler<br/>512 MB · 60s"]
+    end
+
+    subgraph AI["🤖 AI Services"]
+        BEDROCK["Bedrock Converse API<br/>5-model APAC fallback"]
+        TEXTRACT["Textract Queries"]
+        TRANSCRIBE["Transcribe + Polly"]
+        SAGEMAKER["SageMaker Geospatial"]
+    end
+
+    subgraph Data["💾 Data"]
+        DDB["DynamoDB<br/>Single Table · On-demand"]
+        S3["S3 Buckets<br/>raw · processed · archive · dashboard"]
+        SECRETS["Secrets Manager"]
+    end
+
+    WA --> APIGW --> ROUTER
+    DASH --> S3
+    APPSYNC --> SYNC
+    ROUTER --> DOC & VOICE & ORCH
+    ORCH --> CREDIT & SAT & KB
+    DOC --> BEDROCK & TEXTRACT
+    VOICE --> TRANSCRIBE
+    ORCH --> BEDROCK
+    KB --> BEDROCK
+    SAT --> SAGEMAKER
+    DOC & ORCH & CREDIT & SAT & SYNC --> DDB
+    DOC & VOICE --> S3
 ```
 
 ---
 
 ## 📋 Prerequisites
 
-- AWS Account (Account ID: 682366718780, Region: ap-south-1)
+- AWS Account (Region: ap-south-1)
 - Meta WhatsApp Business Account
 - Python 3.11+
-- Node.js 20+ (for AWS CDK)
+- Node.js 18+ (for AWS CDK)
 - AWS CLI configured
+- Docker (optional, recommended for Lambda packaging)
 
 ---
 
@@ -48,53 +90,32 @@ graph TB
 
 ```bash
 cd kisan-setu-mvp
-
-# Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install Python dependencies
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Install CDK
 npm install -g aws-cdk
 ```
 
-### 2. Configure Meta WhatsApp Credentials
-
-Get your credentials from Meta Developer Console:
-- Phone Number ID: `1043444535519617`
-- Business Account ID: `1249840547247394`
-- Access Token: (from Meta dashboard)
+### 2. Configure WhatsApp Credentials
 
 ```bash
-# Set environment variable
 export WHATSAPP_ACCESS_TOKEN="your_access_token_here"
-
-# Deploy and configure
 ./deploy_meta_whatsapp.sh
 ```
 
 ### 3. Deploy Infrastructure
 
 ```bash
-# Silence Node.js version warning (optional)
-export JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1
-
-# Bootstrap CDK (first time only)
-cdk bootstrap aws://682366718780/ap-south-1
-
-# Deploy stack
+cdk bootstrap aws://YOUR_ACCOUNT_ID/ap-south-1   # first time only
 cdk deploy --require-approval never
 ```
 
 ### 4. Configure Webhook in Meta Dashboard
 
 1. Go to Meta App Dashboard → Configuration → Webhooks
-2. Set Callback URL: `https://061d3ls8qh.execute-api.ap-south-1.amazonaws.com/prod/webhook`
+2. Set Callback URL: your API Gateway webhook URL (from CDK output)
 3. Set Verify Token: `kisan-setu-verify-2026`
-4. Click "Verify and Save"
-5. Subscribe to `messages` webhook field
+4. Subscribe to `messages` webhook field
 
 ---
 
@@ -103,197 +124,129 @@ cdk deploy --require-approval never
 ```
 kisan-setu-mvp/
 ├── lambda/
-│   ├── router/              # Message routing
-│   ├── processor/           # Document/image processing
-│   ├── voice/               # Voice message handling
-│   ├── orchestrator/        # Bedrock AI orchestration
-│   ├── credit/              # Credit score calculation
-│   ├── satellite/           # Satellite imagery analysis
-│   ├── knowledge/           # Knowledge base queries
-│   ├── sync/                # Offline sync handler
-│   ├── whatsapp/            # WhatsApp integration
-│   │   ├── meta_whatsapp_interface.py
-│   │   ├── webhook_handler.py
-│   │   └── whatsapp_interface.py
-│   └── common/              # Shared utilities
+│   ├── router/              # Message routing + webhook verification
+│   ├── processor/           # Ledger digitization (LLM + Textract)
+│   ├── voice/               # Transcribe + Polly voice processing
+│   ├── orchestrator/        # Bedrock AI orchestration + tiered routing
+│   ├── credit/              # Credit score calculation engine
+│   ├── satellite/           # NDVI analysis + yield prediction
+│   ├── knowledge/           # RAG-based knowledge retrieval
+│   ├── sync/                # Offline sync (AppSync resolver)
+│   ├── whatsapp/            # Meta WhatsApp Business API interface
+│   └── common/              # Shared: models, validation, error handling,
+│                            #   LLM adapter, encryption, cost optimization
+├── dashboard/               # S3-hosted FPO admin dashboard
+│   ├── index.html           # Responsive UI with stats, charts, maps
+│   └── app.js               # Real-time updates, Chart.js, Leaflet.js
+├── tests/                   # 55+ test files (unit + property-based + integration)
+├── .github/workflows/       # CI/CD pipeline (5 parallel jobs)
 ├── infrastructure_stack.py  # CDK infrastructure
 ├── app.py                   # CDK app entry point
-├── schema.graphql           # AppSync schema
-├── deploy_meta_whatsapp.sh  # Deployment script
+├── schema.graphql           # AppSync GraphQL schema
+├── deploy.sh                # Full automated deployment (Docker)
+├── build_lambda_packages.sh # Lambda package builder
+├── deploy_meta_whatsapp.sh  # WhatsApp setup + deploy
+├── seed_data.py             # DynamoDB seed script
+├── cdk.json                 # CDK configuration
+├── pytest.ini               # Test config
 └── requirements.txt         # Python dependencies
 ```
+
+
+---
+
+## 🤖 LLM Resilience
+
+5-model APAC inference profile fallback chain with per-model circuit breakers:
+
+```mermaid
+graph LR
+    T1["1. Nova Pro"] -->|fail| T2["2. Nova Lite"]
+    T2 -->|fail| T3["3. Claude 3.7 Sonnet"]
+    T3 -->|fail| T4["4. Claude 3.5 Sonnet v2"]
+    T4 -->|fail| T5["5. Claude 3 Haiku"]
+```
+
+- Circuit breaker per model (3 failures → 60s cooldown)
+- Exponential backoff retry (1s → 2s → 4s)
+- Tiered model routing (simple/medium/complex queries)
+- Multimodal support for image+text (ledger extraction)
 
 ---
 
 ## 🧪 Testing
 
-### Test Webhook Verification
-
 ```bash
-curl "https://061d3ls8qh.execute-api.ap-south-1.amazonaws.com/prod/webhook?hub.mode=subscribe&hub.verify_token=kisan-setu-verify-2026&hub.challenge=test123"
+# Run all tests
+cd kisan-setu-mvp
+pytest tests/ -v
+
+# Property-based tests only
+pytest tests/ -k "properties" -v
 ```
 
-### Send Test Message
-
-1. Go to Meta App Dashboard → API Setup
-2. Click "Send Test Message"
-3. Send a message to test the integration
-
-### Monitor Lambda Logs
-
-```bash
-# Real-time logs
-aws logs tail /aws/lambda/KisanSetuMVPStack-MessageRouter8CD84FD1-h6L1m4kKPfOf \
-  --follow --region ap-south-1
-
-# Recent logs
-aws logs tail /aws/lambda/KisanSetuMVPStack-MessageRouter8CD84FD1-h6L1m4kKPfOf \
-  --since 1h --region ap-south-1
-```
-
----
-
-## 🔧 Configuration
-
-### Update WhatsApp Access Token
-
-```bash
-# Update token in Secrets Manager
-aws secretsmanager update-secret \
-  --secret-id kisan-setu/whatsapp/credentials \
-  --secret-string "{
-    \"WHATSAPP_ACCESS_TOKEN\": \"your_new_token\",
-    \"PHONE_NUMBER_ID\": \"1043444535519617\",
-    \"BUSINESS_ACCOUNT_ID\": \"1249840547247394\",
-    \"VERIFY_TOKEN\": \"kisan-setu-verify-2026\"
-  }" \
-  --region ap-south-1
-```
-
-### Environment Variables
-
-Lambda functions use these environment variables:
-- `DYNAMODB_TABLE`: KisanSetuData
-- `WHATSAPP_SECRET_NAME`: kisan-setu/whatsapp/credentials
-- `WEBHOOK_VERIFY_TOKEN`: kisan-setu-verify-2026
-- `BEDROCK_AGENT_ID`: UUQPVM0ULJ
-- `BEDROCK_AGENT_ALIAS_ID`: A2TGFPMFXZ
+CI/CD pipeline (GitHub Actions) runs 5 parallel jobs: unit tests, property-based tests (Hypothesis), integration tests (LocalStack), code quality (black/flake8/pylint), security scan (bandit/safety).
 
 ---
 
 ## 📊 AWS Resources
 
-### Lambda Functions
-- MessageRouter - Routes incoming messages
-- DocumentProcessor - Processes images/ledgers
-- VoiceHandler - Handles voice messages
-- BedrockOrchestrator - AI orchestration
-- CreditCalculator - Credit scoring
-- SatelliteAnalyzer - Satellite analysis
-- KnowledgeBase - Agricultural knowledge queries
-- SyncHandler - Offline sync
+### Lambda Functions (8 deployed via CDK)
+- MessageRouter — Routes incoming messages + webhook verification
+- DocumentProcessor — Ledger image processing (LLM + Textract)
+- VoiceHandler — Voice transcription + TTS
+- BedrockOrchestrator — AI conversation orchestration
+- CreditCalculator — Credit scoring (0–100)
+- SatelliteAnalyzer — NDVI satellite analysis
+- KnowledgeBase — RAG-based agricultural knowledge
+- SyncHandler — Offline sync (AppSync resolver)
 
 ### Storage
-- DynamoDB: KisanSetuData (conversation history, transactions)
-- S3 Buckets:
-  - kisan-setu-raw-{account_id}
-  - kisan-setu-processed-{account_id}
-  - kisan-setu-archive-{account_id}
+- DynamoDB: `KisanSetuData` (single-table design, on-demand, GSI1)
+- S3 Buckets: `kisan-setu-raw-{acct}`, `kisan-setu-processed-{acct}`, `kisan-setu-archive-{acct}`, `kisan-setu-dashboard-{acct}`
 
 ### API
-- API Gateway: WhatsApp webhook endpoint
+- API Gateway: REST webhook endpoint (GET/POST `/webhook`, POST `/process`, `/credit`, `/knowledge`)
 - AppSync: GraphQL API for offline sync
 
 ### Monitoring
-- CloudWatch Logs: Lambda execution logs
-- SNS Topic: kisan-setu-critical-alerts
+- CloudWatch Logs (all Lambdas)
+- SNS Topic: `kisan-setu-critical-alerts`
 
 ---
 
 ## 🔐 Security
 
-- WhatsApp credentials stored in AWS Secrets Manager
-- IAM roles with least privilege access
+- WhatsApp credentials in AWS Secrets Manager
+- Field-level encryption (KMS + Fernet) for sensitive data
+- IAM roles with service-specific policies
 - API Gateway throttling (100 req/s, burst 200)
 - Webhook verification token validation
+- Automatic audit trail on all data mutations
 
 ---
 
 ## 📚 Documentation
 
-- `START_HERE.md` - Getting started guide
-- `META_WHATSAPP_QUICKSTART.md` - Meta WhatsApp setup
-- `META_WEBHOOK_SETUP.md` - Webhook configuration
-- `META_SETUP_COMPLETE.md` - Complete setup overview
-- `DEPLOYMENT_ORDER.md` - Deployment sequence
-- `COMMON_ERRORS.md` - Troubleshooting guide
-- `TESTING_GUIDE.md` - Testing procedures
-- `PRODUCTION_DEPLOYMENT.md` - Production checklist
+- [`architecture.md`](architecture.md) — Full architecture reference (Mermaid diagrams)
+- [`kisan-setu-mvp/README.md`](kisan-setu-mvp/README.md) — Detailed project README
+- [`IMPLEMENTATION_STATUS_AND_TASKS.md`](IMPLEMENTATION_STATUS_AND_TASKS.md) — Task flow & status
+- [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — Common issues & solutions
+- [`FAQ.md`](FAQ.md) — Frequently asked questions
+- [`kisan-setu-mvp/DEPLOYMENT_SCRIPTS.md`](kisan-setu-mvp/DEPLOYMENT_SCRIPTS.md) — Deployment script reference
+- [`.kiro/specs/kisan-setu/SETUP-GUIDE.md`](.kiro/specs/kisan-setu/SETUP-GUIDE.md) — Step-by-step setup guide
 
 ---
 
 ## 🚨 Troubleshooting
 
-### Webhook Not Receiving Messages
+See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for detailed solutions. Quick checklist:
 
-1. Check `messages` field is subscribed in Meta dashboard
-2. Verify webhook URL is correct
-3. Check Lambda logs for errors
-4. Test webhook verification endpoint
-
-### Lambda Errors
-
-```bash
-# Check function configuration
-aws lambda get-function-configuration \
-  --function-name KisanSetuMVPStack-MessageRouter8CD84FD1-h6L1m4kKPfOf \
-  --region ap-south-1
-
-# View recent errors
-aws logs filter-pattern "ERROR" \
-  --log-group-name /aws/lambda/KisanSetuMVPStack-MessageRouter8CD84FD1-h6L1m4kKPfOf \
-  --region ap-south-1
-```
-
-### Access Token Issues
-
-- Tokens expire - regenerate in Meta dashboard
-- Update in Secrets Manager immediately
-- No redeployment needed - Lambda picks up new token automatically
-
----
-
-## 🎯 Development Mode vs Production
-
-### Development Mode (Current)
-- Only receives test messages from Meta dashboard
-- Perfect for testing and development
-- No app review required
-
-### Production Mode
-- Receives messages from real users
-- Requires Meta app review and approval
-- Switch app to "Live" mode in Meta dashboard
-
----
-
-## 📞 Support
-
-### AWS Issues
-- Check CloudWatch Logs
-- Review IAM permissions
-- Verify resource configurations
-
-### Meta WhatsApp Issues
-- [Meta WhatsApp Documentation](https://developers.facebook.com/docs/whatsapp/cloud-api)
-- [Webhook Reference](https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks)
-- Check Meta App Dashboard for errors
-
----
-
-## 📝 License
-
-Proprietary - AI for Bharat Hackathon 2026
+1. Check CloudWatch logs for the relevant Lambda
+2. Verify webhook URL matches CDK deployment output
+3. Verify WhatsApp credentials in Secrets Manager
+4. Verify Bedrock model access is enabled for all 5 models
+5. Redeploy: `./deploy.sh`
 
 ---
 
@@ -301,16 +254,19 @@ Proprietary - AI for Bharat Hackathon 2026
 
 Built with:
 - AWS Bedrock (5-model APAC inference profile fallback: Nova Pro, Nova Lite, Claude 3.7 Sonnet, Claude 3.5 Sonnet v2, Claude 3 Haiku)
-- AWS Textract
-- AWS Transcribe & Polly
+- AWS Textract, Transcribe, Polly
 - SageMaker Geospatial
 - Meta WhatsApp Business API
-- AWS CDK
+- AWS CDK (Python)
+
+---
+
+## 📝 License
+
+MIT — AI for Bharat Hackathon 2026
 
 ---
 
 **Status**: ✅ Production Ready | Meta WhatsApp Integration Active
-
-**Webhook URL**: `https://061d3ls8qh.execute-api.ap-south-1.amazonaws.com/prod/webhook`
 
 **Last Updated**: March 9, 2026
