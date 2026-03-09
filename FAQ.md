@@ -105,11 +105,17 @@ aws secretsmanager update-secret \
 ## 🤖 AI & Bedrock
 
 ### Q: What AI model is used?
-**A**: Claude 3.5 Sonnet v2 from AWS Bedrock. It's optimized for:
-- Natural language understanding
-- Multi-language support
-- Agricultural knowledge
-- Conversational responses
+**A**: The system uses a 5-model fallback chain via AWS Bedrock's Converse API with APAC inference profiles:
+
+1. **Amazon Nova Pro** (primary — available without Marketplace subscription)
+2. **Amazon Nova Lite** (fast, cheap fallback)
+3. **Claude 3.7 Sonnet** (requires AWS Marketplace subscription)
+4. **Claude 3.5 Sonnet v2** (requires AWS Marketplace subscription)
+5. **Claude 3 Haiku** (requires AWS Marketplace subscription)
+
+For multimodal (image) processing, the chain is: Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Nova Pro → Claude 3 Haiku → Nova Lite.
+
+Each model has a circuit breaker (3 failures → 60s cooldown) and exponential backoff retries. If one model is throttled or unavailable, the system automatically tries the next.
 
 ### Q: Do I need to create a Bedrock Agent?
 **A**: No, it's optional. The system works in two modes:
@@ -122,8 +128,12 @@ If agent doesn't exist, system automatically falls back to direct model calls.
 **A**: 
 1. Go to AWS Console → Bedrock → Model access
 2. Click "Manage model access"
-3. Select:
-   - Claude 3.5 Sonnet v2
+3. Select all models used in the fallback chain:
+   - Amazon Nova Pro
+   - Amazon Nova Lite
+   - Claude 3.7 Sonnet (requires APAC inference profile)
+   - Claude 3.5 Sonnet v2 (requires APAC inference profile)
+   - Claude 3 Haiku (requires APAC inference profile)
    - Titan Embeddings G1 - Text
 4. Click "Request model access"
 5. Wait 5-30 minutes for approval
@@ -482,7 +492,7 @@ aws sns subscribe \
 
 ### Q: What's missing for production?
 **A**: 
-1. Admin dashboard (optional)
+1. ~~Admin dashboard~~ ✅ Now implemented (S3-hosted static dashboard with live message feed, credit charts, NDVI map, ledger preview)
 2. Monitoring dashboards
 3. Backup and disaster recovery
 4. Load testing

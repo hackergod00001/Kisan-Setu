@@ -1,3 +1,5 @@
+> **Note:** This setup guide has been updated to reflect the current implementation, which uses a 5-model APAC inference profile fallback chain. See `kisan-setu-mvp/README.md` for full architecture details.
+
 # Kisan-Setu Setup Guide
 
 Complete guide for deploying the Kisan-Setu WhatsApp-based agricultural assistant from scratch.
@@ -52,11 +54,17 @@ aws sts get-caller-identity
 ### 2.1 Request Model Access
 1. Go to AWS Console → Bedrock → Model access
 2. Click "Manage model access"
-3. Enable these models:
-   - **Claude 3.5 Sonnet v2** (anthropic.claude-3-5-sonnet-20241022-v2:0)
+3. Enable these models (all used in the 5-model fallback chain):
+   - **Amazon Nova Pro** (`apac.amazon.nova-pro-v1:0`) — primary text model
+   - **Amazon Nova Lite** (`apac.amazon.nova-lite-v1:0`) — fast fallback
+   - **Claude 3.7 Sonnet** (`apac.anthropic.claude-3-7-sonnet-20250219-v1:0`) — multimodal primary
+   - **Claude 3.5 Sonnet v2** (`apac.anthropic.claude-3-5-sonnet-20241022-v2:0`)
+   - **Claude 3 Haiku** (`apac.anthropic.claude-3-haiku-20240307-v1:0`)
    - **Titan Text Embeddings V2** (amazon.titan-embed-text-v2:0)
 4. Click "Request model access"
 5. Wait for approval (5-30 minutes, check email)
+
+**Note:** Claude models require APAC inference profiles. Nova models are available without Marketplace subscription and are prioritized in the fallback chain.
 
 ### 2.2 Verify Access
 ```bash
@@ -236,9 +244,9 @@ pip install -r requirements.txt
 ### Monthly Costs (Estimated)
 - Lambda: $5-10 (10M requests)
 - Textract: $5-10 (1000 pages)
-- Bedrock: $20-30 (Claude 3.5 Sonnet)
+- Bedrock: $20-30 (5-model fallback chain via APAC inference profiles)
 - DynamoDB: $2-5 (on-demand)
-- S3: $1-2 (10GB storage)
+- S3: $1-2 (10GB storage + dashboard hosting)
 - Meta WhatsApp: Free (Cloud API)
 
 **Total: ~$33-57/month**

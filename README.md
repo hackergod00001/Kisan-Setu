@@ -303,7 +303,7 @@ Proprietary - AI for Bharat Hackathon 2026
 ## 🙏 Acknowledgments
 
 Built with:
-- AWS Bedrock (Claude 3.5 Sonnet)
+- AWS Bedrock (5-model APAC inference profile fallback: Nova Pro, Nova Lite, Claude 3.7 Sonnet, Claude 3.5 Sonnet v2, Claude 3 Haiku)
 - AWS Textract
 - AWS Transcribe & Polly
 - SageMaker Geospatial

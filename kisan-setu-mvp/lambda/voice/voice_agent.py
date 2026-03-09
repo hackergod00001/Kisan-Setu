@@ -48,11 +48,24 @@ class VoiceAgent:
     Hindi (hi-IN), Marathi (mr-IN), and Tamil (ta-IN).
     """
     
-    # Supported languages
-    SUPPORTED_LANGUAGES = ['hi-IN', 'mr-IN', 'ta-IN']
-    
+    # Supported languages (short codes used by our app)
+    SUPPORTED_LANGUAGES = ['en', 'hi-IN', 'mr-IN', 'ta-IN']
+
+    # Map our language codes to AWS Transcribe language codes
+    # AWS Transcribe requires full locale codes (e.g. 'en-IN', not 'en')
+    TRANSCRIBE_LANGUAGE_MAP = {
+        'en': 'en-IN',       # English (India)
+        'hi-IN': 'hi-IN',   # Hindi
+        'mr-IN': 'mr-IN',   # Marathi
+        'ta-IN': 'ta-IN',   # Tamil
+    }
+
+    # Full locale codes accepted by AWS Transcribe for LanguageOptions
+    TRANSCRIBE_LANGUAGE_OPTIONS = ['en-IN', 'hi-IN', 'mr-IN', 'ta-IN']
+
     # Language to Polly voice mapping
     VOICE_MAPPING = {
+        'en': 'Joanna',    # English female voice
         'hi-IN': 'Aditi',  # Hindi female voice
         'mr-IN': 'Aditi',  # Use Hindi voice for Marathi (closest available)
         'ta-IN': 'Aditi',  # Use Hindi voice for Tamil (closest available)
@@ -119,11 +132,13 @@ class VoiceAgent:
             
             # Add language identification or specific language
             if language_hint and language_hint in self.SUPPORTED_LANGUAGES:
-                job_params['LanguageCode'] = language_hint
+                # Map to full locale code required by AWS Transcribe
+                transcribe_lang = self.TRANSCRIBE_LANGUAGE_MAP.get(language_hint, 'en-IN')
+                job_params['LanguageCode'] = transcribe_lang
             else:
                 # Use automatic language identification
                 job_params['IdentifyLanguage'] = True
-                job_params['LanguageOptions'] = self.SUPPORTED_LANGUAGES
+                job_params['LanguageOptions'] = self.TRANSCRIBE_LANGUAGE_OPTIONS
             
             # Start transcription job with retry logic
             self._start_transcription_with_retry(job_params)
@@ -392,20 +407,48 @@ class VoiceAgent:
     def _download_transcript(self, transcript_uri: str) -> Dict:
         """
         Download transcript JSON from S3.
-        
+
+        The transcript_uri from Transcribe is an HTTPS URL pointing to the
+        output S3 bucket. We parse bucket/key from the URL and download via
+        the S3 client (which uses IAM credentials) instead of urllib
+        (which would need the bucket to be public).
+
         Args:
-            transcript_uri: S3 URI to transcript file
-            
+            transcript_uri: HTTPS URL or S3 URI to transcript file
+
         Returns:
             Transcript data as dictionary
         """
         import json
-        import urllib.request
-        
-        # Download transcript
-        with urllib.request.urlopen(transcript_uri) as response:
-            transcript_data = json.loads(response.read().decode('utf-8'))
-        
+        import re
+
+        # Parse bucket and key from the HTTPS URL returned by Transcribe
+        # Format: https://s3.<region>.amazonaws.com/<bucket>/<key>
+        # or:     https://<bucket>.s3.<region>.amazonaws.com/<key>
+        match = re.match(
+            r'https://s3[.\-][\w-]+\.amazonaws\.com/([^/]+)/(.+)', transcript_uri
+        )
+        if not match:
+            match = re.match(
+                r'https://([^.]+)\.s3[.\-][\w-]+\.amazonaws\.com/(.+)', transcript_uri
+            )
+
+        if match:
+            bucket = match.group(1)
+            key = match.group(2)
+            logger.info(f"Downloading transcript from S3: bucket={bucket}, key={key}")
+            response = self.s3.get_object(Bucket=bucket, Key=key)
+            transcript_data = json.loads(response['Body'].read().decode('utf-8'))
+            return transcript_data
+
+        # Fallback: if URL format is unrecognized, try the output bucket directly
+        # The key is typically the job name + .json
+        logger.warning(f"Could not parse S3 URL from transcript URI: {transcript_uri}, "
+                       f"trying output bucket {self.s3_bucket_processed}")
+        # Extract filename from URI
+        key = transcript_uri.split('/')[-1]
+        response = self.s3.get_object(Bucket=self.s3_bucket_processed, Key=key)
+        transcript_data = json.loads(response['Body'].read().decode('utf-8'))
         return transcript_data
     
     def validate_audio_quality(self, audio_url: str) -> bool:

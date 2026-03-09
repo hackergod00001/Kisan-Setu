@@ -259,13 +259,20 @@ class CreditEngine:
     
     # Private helper methods
     
+    def _ensure_pk_prefix(self, farmer_id: str) -> str:
+        """Ensure farmer_id has the FARMER# prefix for DynamoDB queries."""
+        if farmer_id.startswith('FARMER#'):
+            return farmer_id
+        return f'FARMER#{farmer_id}'
+
     def _get_farmer_transactions(self, farmer_id: str) -> List[Dict]:
         """Get all transactions for a farmer."""
         try:
+            pk = self._ensure_pk_prefix(farmer_id)
             result = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
-                    ':pk': farmer_id,
+                    ':pk': pk,
                     ':sk': 'TXN#'
                 }
             )
@@ -273,14 +280,15 @@ class CreditEngine:
         except Exception as e:
             print(f"Error fetching transactions: {str(e)}")
             return []
-    
+
     def _get_previous_score(self, farmer_id: str) -> Optional[float]:
         """Get the most recent score for a farmer."""
         try:
+            pk = self._ensure_pk_prefix(farmer_id)
             result = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
-                    ':pk': farmer_id,
+                    ':pk': pk,
                     ':sk': 'SCORE#'
                 },
                 ScanIndexForward=False,  # Descending order
@@ -293,12 +301,13 @@ class CreditEngine:
         except Exception as e:
             print(f"Error fetching previous score: {str(e)}")
             return None
-    
+
     def _store_score(self, score: ReliabilityScore):
         """Store reliability score in DynamoDB."""
         try:
+            pk = self._ensure_pk_prefix(score.farmer_id)
             score_data = {
-                'PK': score.farmer_id,
+                'PK': pk,
                 'SK': f"SCORE#{score.calculation_date.date().isoformat()}",
                 'total_score': Decimal(str(score.total_score)),
                 'supply_consistency': Decimal(str(score.supply_consistency)),
@@ -315,9 +324,33 @@ class CreditEngine:
     
     def _notify_significant_change(self, score: ReliabilityScore):
         """Notify FPO manager of significant score change (>10 points)."""
-        # TODO: Implement SNS notification to FPO manager
         print(f"SIGNIFICANT SCORE CHANGE: Farmer {score.farmer_id} score changed by {score.score_change:.2f} points")
         print(f"New score: {score.total_score:.2f}")
+
+        try:
+            sns_topic_arn = os.environ.get('SNS_ALERT_TOPIC_ARN')
+            if sns_topic_arn:
+                sns_client = boto3.client('sns')
+                direction = "increased" if score.score_change > 0 else "decreased"
+                sns_client.publish(
+                    TopicArn=sns_topic_arn,
+                    Subject=f"Credit Score Alert - Farmer {score.farmer_id}",
+                    Message=(
+                        f"Significant credit score change detected.\n\n"
+                        f"Farmer ID: {score.farmer_id}\n"
+                        f"New Score: {score.total_score:.1f}/100\n"
+                        f"Change: {direction} by {abs(score.score_change):.1f} points\n"
+                        f"Rating: {get_rating(score.total_score)}\n\n"
+                        f"Breakdown:\n"
+                        f"  Supply Consistency: {score.supply_consistency:.1f}/30\n"
+                        f"  Quality Metrics: {score.quality_metrics:.1f}/25\n"
+                        f"  Transaction History: {score.transaction_history:.1f}/20\n"
+                        f"  Financial Behavior: {score.financial_behavior:.1f}/15\n"
+                        f"  Operational Transparency: {score.operational_transparency:.1f}/10"
+                    )
+                )
+        except Exception as sns_err:
+            print(f"Failed to send SNS notification: {sns_err}")
     
     # Component calculation helpers
     
@@ -537,8 +570,11 @@ def handler(event, context):
     try:
         print(f"Calculating credit score: {json.dumps(event)}")
         
-        # Parse request
-        body = json.loads(event.get('body', '{}'))
+        # Parse request — support both API Gateway (body as JSON string) and direct Lambda invocation
+        if isinstance(event.get('body'), str):
+            body = json.loads(event['body'])
+        else:
+            body = event
         farmer_id = body.get('farmer_id')
         
         if not farmer_id:

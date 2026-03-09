@@ -29,6 +29,7 @@ from common.cost_optimization import (
     concurrent_processor
 )
 from common.llm_adapter import LLMAdapter, LLMAdapterError
+from common.ledger_formatter import format_ledger_response, get_market_ref, MARKET_PRICES
 # Import WhatsApp interface from local copy
 from meta_whatsapp_interface import MetaWhatsAppInterface
 
@@ -58,6 +59,8 @@ LEDGER_QUERIES = [
 
 # Confidence threshold for field validation
 CONFIDENCE_THRESHOLD = 70.0
+
+# MARKET_PRICES and get_market_ref are imported from common.ledger_formatter
 
 
 @dataclass
@@ -144,19 +147,21 @@ class DocumentProcessor:
         'कांदा', 'गहू', 'तांदूळ', 'कापूस', 'ऊस',
     ]
 
-    def extract_ledger_data(self, image_url: str, language: str = 'en') -> LedgerData:
+    def extract_ledger_data(self, image_url: str, language: str = 'en') -> List[LedgerData]:
         """
         Extracts structured data from ledger image.
 
         Strategy: Always use multimodal LLM as primary (more accurate for handwritten
         Indian agricultural ledgers). Fall back to Textract if LLM fails.
 
+        Supports multi-item ledgers: a single photo may contain multiple crop entries.
+
         Args:
             image_url: S3 URL or key to the ledger image
             language: Language code (hi-IN, mr-IN, ta-IN, en)
 
         Returns:
-            LedgerData with fields and confidence scores
+            List of LedgerData objects (one per item detected in the image)
 
         Raises:
             Exception: If all extraction methods fail
@@ -167,19 +172,19 @@ class DocumentProcessor:
         s3_bucket, s3_key = self._parse_s3_url(image_url)
 
         # Strategy: LLM first (better for handwritten Indian ledgers), Textract as fallback
-        ledger_data = None
+        ledger_items: Optional[List[LedgerData]] = None
 
         # Try multimodal LLM first (primary path)
         if self.use_multimodal_llm and self.llm_adapter:
             try:
                 print("Using multimodal LLM as primary extraction method...")
-                ledger_data = self._extract_with_multimodal_llm(image_url, language, s3_bucket, s3_key)
-                print(f"LLM extraction succeeded: {ledger_data.ledger_id}")
+                ledger_items = self._extract_with_multimodal_llm(image_url, language, s3_bucket, s3_key)
+                print(f"LLM extraction succeeded: {len(ledger_items)} item(s) extracted")
             except Exception as llm_error:
                 print(f"LLM extraction failed: {str(llm_error)}, falling back to Textract...")
 
         # Fallback to Textract if LLM failed or not available
-        if ledger_data is None:
+        if ledger_items is None:
             try:
                 response = self._analyze_document_with_retry(s3_bucket, s3_key)
                 extracted_data = self._parse_textract_response(response)
@@ -208,6 +213,8 @@ class DocumentProcessor:
                 if self.use_multimodal_llm and self.llm_adapter:
                     ledger_data = self._post_process_with_llm(ledger_data, s3_bucket, s3_key)
 
+                ledger_items = [ledger_data]
+
             except Exception as e:
                 print(f"Textract extraction also failed: {str(e)}")
                 error = create_error_response(
@@ -219,11 +226,11 @@ class DocumentProcessor:
                 )
                 raise Exception(error.user_message)
 
-        # Sanitize extracted fields
-        ledger_data = self._sanitize_fields(ledger_data)
+        # Sanitize extracted fields for each item
+        ledger_items = [self._sanitize_fields(item) for item in ledger_items]
 
-        print(f"Successfully extracted ledger data: {ledger_data.ledger_id}")
-        return ledger_data
+        print(f"Successfully extracted {len(ledger_items)} ledger item(s)")
+        return ledger_items
     
     @retry_with_exponential_backoff(max_retries=3, service_name='textract')
     def _analyze_document_with_retry(self, s3_bucket: str, s3_key: str) -> Dict:
@@ -245,9 +252,12 @@ class DocumentProcessor:
         language: str,
         s3_bucket: str,
         s3_key: str
-    ) -> LedgerData:
+    ) -> List[LedgerData]:
         """
         Extract ledger data using multimodal LLM (Claude 3 vision).
+
+        Supports multi-item ledgers: a single photo may contain multiple crop entries
+        (e.g. "100 kg potato ₹14, 500 kg onion ₹17"). Returns one LedgerData per item.
 
         Args:
             image_url: S3 URL to the image
@@ -256,7 +266,7 @@ class DocumentProcessor:
             s3_key: S3 key
 
         Returns:
-            LedgerData extracted by multimodal LLM
+            List of LedgerData objects extracted by multimodal LLM
         """
         print(f"Using multimodal LLM for extraction: {image_url}")
 
@@ -267,8 +277,8 @@ class DocumentProcessor:
         # Determine image format from key
         image_format = 'jpeg' if s3_key.lower().endswith(('.jpg', '.jpeg')) else 'png'
 
-        # Prepare prompt — handles both formal ledger books and simple handwritten notes
-        base_prompt = """You are analyzing a photo of a handwritten Indian agricultural record. It could be a formal ledger book OR a simple handwritten note/receipt.
+        # Prepare prompt — handles multi-item ledgers and simple notes
+        base_prompt = """You are analyzing a photo of a handwritten Indian agricultural record. It could be a formal ledger book, a simple handwritten note/receipt, or a page with MULTIPLE entries.
 
 CRITICAL RULES:
 1. ONLY extract values you can actually SEE written in the image. Do NOT guess or infer.
@@ -281,8 +291,17 @@ CRITICAL RULES:
 8. date: In YYYY-MM-DD format. If only day-month visible, use current year.
 9. farmer_name: Only if a person's name is written.
 
-Respond ONLY with valid JSON, no other text:
-{"crop_type": "...", "quantity": "...", "price": "...", "moisture": "...", "quality_grade": "...", "date": "...", "farmer_name": "..."}"""
+IMPORTANT: The image may contain MULTIPLE line items (e.g. several crops sold on the same day).
+- If there is ONE item, return a single JSON object.
+- If there are MULTIPLE items, return a JSON array of objects.
+
+Single item format:
+{"crop_type": "...", "quantity": "...", "price": "...", "moisture": "...", "quality_grade": "...", "date": "...", "farmer_name": "..."}
+
+Multiple items format:
+[{"crop_type": "...", "quantity": "...", "price": "...", "moisture": "...", "quality_grade": "...", "date": "...", "farmer_name": "..."}, ...]
+
+Respond ONLY with valid JSON, no other text."""
 
         prompt = base_prompt
 
@@ -297,49 +316,61 @@ Respond ONLY with valid JSON, no other text:
         print(f"LLM response: {response_text}")
         print(f"Token usage: {input_tokens} in / {output_tokens} out")
 
-        # Parse JSON response
-        extracted_data = self._parse_llm_response(response_text)
-
-        # Generate ledger ID
-        ledger_id = f"LEDGER#{datetime.utcnow().isoformat()}"
+        # Parse JSON response — may be a single object or an array
+        extracted_items = self._parse_llm_response_multi(response_text)
 
         # Extract farmer ID from image URL
         farmer_id = self._extract_farmer_id_from_url(image_url)
 
-        # Build LedgerData object
-        # LLM confidence is estimated based on successful parsing
+        # Build LedgerData objects
         confidence = 85.0  # Assume high confidence if LLM parsed successfully
+        results: List[LedgerData] = []
 
-        ledger_data = LedgerData(
-            ledger_id=ledger_id,
-            farmer_id=farmer_id,
-            quantity=self._safe_float(extracted_data.get('quantity', '0')),
-            moisture=self._safe_float(extracted_data.get('moisture', '0')),
-            price=self._safe_float(extracted_data.get('price', '0')),
-            date=extracted_data.get('date', ''),
-            crop_type=extracted_data.get('crop_type', 'unknown'),
-            farmer_name=extracted_data.get('farmer_name', ''),
-            quality_grade=extracted_data.get('quality_grade', ''),
-            confidence_scores={
-                'QUANTITY': confidence,
-                'MOISTURE': confidence,
-                'PRICE': confidence,
-                'DATE': confidence,
-                'CROP_TYPE': confidence,
-                'FARMER_NAME': confidence,
-                'QUALITY_GRADE': confidence
-            },
-            image_url=image_url,
-            fields_needing_review=[]
-        )
+        for idx, extracted_data in enumerate(extracted_items):
+            import time as _time
+            ledger_id = f"LEDGER#{datetime.utcnow().isoformat()}"
 
-        print(f"Successfully extracted via LLM: {ledger_id}")
-        return ledger_data
+            # Auto-fill date with today if not detected
+            extracted_date = extracted_data.get('date', '')
+            if not extracted_date or extracted_date.strip() in ('', '0', 'unknown', 'N/A'):
+                extracted_date = date.today().isoformat()
+                if idx == 0:
+                    print(f"Date not detected in image, using today: {extracted_date}")
+
+            ledger_data = LedgerData(
+                ledger_id=ledger_id,
+                farmer_id=farmer_id,
+                quantity=self._safe_float(extracted_data.get('quantity', '0')),
+                moisture=self._safe_float(extracted_data.get('moisture', '0')),
+                price=self._safe_float(extracted_data.get('price', '0')),
+                date=extracted_date,
+                crop_type=extracted_data.get('crop_type', 'unknown'),
+                farmer_name=extracted_data.get('farmer_name', ''),
+                quality_grade=extracted_data.get('quality_grade', ''),
+                confidence_scores={
+                    'QUANTITY': confidence,
+                    'MOISTURE': confidence,
+                    'PRICE': confidence,
+                    'DATE': confidence,
+                    'CROP_TYPE': confidence,
+                    'FARMER_NAME': confidence,
+                    'QUALITY_GRADE': confidence
+                },
+                image_url=image_url,
+                fields_needing_review=[]
+            )
+            results.append(ledger_data)
+
+            # Small delay to ensure unique ledger IDs
+            if idx < len(extracted_items) - 1:
+                _time.sleep(0.01)
+
+        print(f"Successfully extracted {len(results)} item(s) via LLM")
+        return results
 
     def _parse_llm_response(self, response_text: str) -> Dict[str, str]:
-        """Parse JSON from LLM response."""
+        """Parse JSON from LLM response (single object)."""
         try:
-            # Try to extract JSON from response (may have markdown code blocks)
             import re
 
             # Remove markdown code blocks if present
@@ -358,6 +389,44 @@ Respond ONLY with valid JSON, no other text:
             print(f"Failed to parse LLM response as JSON: {e}")
             print(f"Raw response: {response_text}")
             return {}
+
+    def _parse_llm_response_multi(self, response_text: str) -> List[Dict[str, str]]:
+        """Parse JSON from LLM response — supports both single object and array of objects."""
+        import re
+
+        try:
+            # Remove markdown code blocks if present
+            block_match = re.search(r'```(?:json)?\s*([\[\{].*?[\]\}])\s*```', response_text, re.DOTALL)
+            if block_match:
+                response_text = block_match.group(1)
+
+            # Try to find JSON array first
+            array_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            if array_match:
+                data = json.loads(array_match.group(0))
+                if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+                    print(f"Parsed multi-item response: {len(data)} items")
+                    return data
+
+            # Fallback: try single object
+            obj_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+            if obj_match:
+                data = json.loads(obj_match.group(0))
+                if isinstance(data, dict):
+                    return [data]
+
+            # Last resort: try parsing the whole thing
+            data = json.loads(response_text)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return [data]
+
+        except Exception as e:
+            print(f"Failed to parse multi-item LLM response: {e}")
+            print(f"Raw response: {response_text}")
+
+        return [{}]
 
     def _post_process_with_llm(self, ledger_data: LedgerData, s3_bucket: str, s3_key: str) -> LedgerData:
         """
@@ -888,128 +957,60 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     
     try:
         print(f"Processing document: {json.dumps(event)}")
-        
+
         sender = event.get('sender')
         message_id = event.get('message_id')
         image_id = event.get('image_id')
         s3_key = event.get('s3_key')
         language = event.get('language', 'en')
-        
+
         if not sender:
             raise ValueError("Missing required field: sender")
-        
+
         # If s3_key not provided, download from WhatsApp and upload to S3
         if not s3_key:
             if image_id:
                 s3_key = download_and_upload_image(image_id, sender)
             else:
                 raise ValueError("Either s3_key or image_id must be provided")
-        
+
         # Build S3 URL
         image_url = f"s3://{S3_BUCKET_RAW}/{s3_key}"
-        
+
         # Initialize DocumentProcessor
         processor = DocumentProcessor()
-        
-        # Extract data using Textract
-        ledger_data = processor.extract_ledger_data(image_url, language)
-        
-        # Validate extraction
-        validation_result = processor.validate_extraction(ledger_data)
-        
-        # Store in DynamoDB
-        transaction_id = processor.store_ledger_data(ledger_data, validation_result)
-        
-        # Format response for WhatsApp — show "Not detected" for missing values
-        def fmt(val, unit='', is_currency=False):
-            """Format a field value, showing 'Not detected' for empty/zero."""
-            if val is None:
-                return 'Not detected'
-            if isinstance(val, (int, float)) and val == 0:
-                return 'Not detected'
-            if isinstance(val, str) and not val.strip():
-                return 'Not detected'
-            if isinstance(val, str) and val.lower() in ('unknown', 'none', 'n/a'):
-                return 'Not detected'
-            if is_currency:
-                return f"₹{val}"
-            return f"{val}{unit}"
 
-        crop_display = fmt(ledger_data.crop_type)
-        qty_display = fmt(ledger_data.quantity, ' kg')
-        price_display = fmt(ledger_data.price, is_currency=True)
-        moisture_display = fmt(ledger_data.moisture, '%')
-        grade_display = fmt(ledger_data.quality_grade)
-        date_display = fmt(ledger_data.date)
+        # Extract data — returns list of LedgerData (multi-item support)
+        ledger_items = processor.extract_ledger_data(image_url, language)
 
-        response_messages = {
-            'en': f"""✅ *Ledger Processed Successfully*
+        # Validate and store each item
+        stored_items = []  # [(transaction_id, ledger_data, validation_result), ...]
+        for ledger_data in ledger_items:
+            validation_result = processor.validate_extraction(ledger_data)
+            transaction_id = processor.store_ledger_data(ledger_data, validation_result)
+            stored_items.append((transaction_id, ledger_data, validation_result))
 
-📋 *Transaction ID:* {transaction_id}
+        # Build item dicts for the unified formatter
+        formatter_items = []
+        for txn_id, ld, vr in stored_items:
+            formatter_items.append({
+                'transaction_id': txn_id,
+                'crop_type': ld.crop_type,
+                'quantity': float(ld.quantity),
+                'price': float(ld.price),
+                'moisture': float(ld.moisture),
+                'quality_grade': ld.quality_grade,
+                'date': ld.date,
+                'farmer_name': ld.farmer_name,
+                'fields_needing_review': vr.fields_needing_review,
+            })
 
-*Extracted Data:*
-• Crop Type: {crop_display}
-• Quantity: {qty_display}
-• Price: {price_display}
-• Moisture: {moisture_display}
-• Quality Grade: {grade_display}
-• Date: {date_display}
+        response_text = format_ledger_response(
+            items=formatter_items,
+            language=language,
+            source='image',
+        )
 
-{f"⚠️ *Fields needing review:* {', '.join(validation_result.fields_needing_review)}" if validation_result.fields_needing_review else "✓ All fields validated"}
-
-Your data has been saved to the system.""",
-            
-            'hi-IN': f"""✅ *खाता सफलतापूर्वक संसाधित*
-
-📋 *लेनदेन ID:* {transaction_id}
-
-*निकाला गया डेटा:*
-• फसल प्रकार: {crop_display}
-• मात्रा: {qty_display}
-• मूल्य: {price_display}
-• नमी: {moisture_display}
-• गुणवत्ता ग्रेड: {grade_display}
-• तारीख: {date_display}
-
-{f"⚠️ *समीक्षा की आवश्यकता:* {', '.join(validation_result.fields_needing_review)}" if validation_result.fields_needing_review else "✓ सभी फ़ील्ड सत्यापित"}
-
-आपका डेटा सिस्टम में सहेजा गया है।""",
-            
-            'mr-IN': f"""✅ *खाते यशस्वीरित्या प्रक्रिया केली*
-
-📋 *व्यवहार ID:* {transaction_id}
-
-*काढलेला डेटा:*
-• पीक प्रकार: {crop_display}
-• प्रमाण: {qty_display}
-• किंमत: {price_display}
-• ओलावा: {moisture_display}
-• गुणवत्ता ग्रेड: {grade_display}
-• तारीख: {date_display}
-
-{f"⚠️ *पुनरावलोकन आवश्यक:* {', '.join(validation_result.fields_needing_review)}" if validation_result.fields_needing_review else "✓ सर्व फील्ड सत्यापित"}
-
-तुमचा डेटा सिस्टममध्ये जतन केला आहे।""",
-            
-            'ta-IN': f"""✅ *கணக்கு வெற்றிகரமாக செயலாக்கப்பட்டது*
-
-📋 *பரிவர்த்தனை ID:* {transaction_id}
-
-*பிரித்தெடுக்கப்பட்ட தரவு:*
-• பயிர் வகை: {crop_display}
-• அளவு: {qty_display}
-• விலை: {price_display}
-• ஈரப்பதம்: {moisture_display}
-• தர தரம்: {grade_display}
-• தேதி: {date_display}
-
-{f"⚠️ *மதிப்பாய்வு தேவை:* {', '.join(validation_result.fields_needing_review)}" if validation_result.fields_needing_review else "✓ அனைத்து புலங்களும் சரிபார்க்கப்பட்டன"}
-
-உங்கள் தரவு அமைப்பில் சேமிக்கப்பட்டது."""
-        }
-        
-        response_text = response_messages.get(language, response_messages['en'])
-        
         # Send response to WhatsApp
         whatsapp = MetaWhatsAppInterface()
         success = whatsapp.send_text_response(
@@ -1017,30 +1018,58 @@ Your data has been saved to the system.""",
             text=response_text,
             language=language
         )
-        
+
         if not success:
             print(f"Failed to send WhatsApp response to {sender}")
-        
-        # Build response
+
+        # Build response — include all items
+        first_txn_id, first_ld, first_vr = stored_items[0]
         response_data = {
             'status': 'success',
-            'transaction_id': transaction_id,
-            'ledger_id': ledger_data.ledger_id,
-            'quantity': float(ledger_data.quantity),
-            'moisture': float(ledger_data.moisture),
-            'price': float(ledger_data.price),
-            'crop_type': ledger_data.crop_type,
-            'quality_grade': ledger_data.quality_grade,
-            'farmer_name': ledger_data.farmer_name,
-            'date': ledger_data.date,
-            'validation_status': 'valid' if validation_result.is_valid else 'needs_review',
-            'fields_needing_review': validation_result.fields_needing_review,
-            'confidence_scores': ledger_data.confidence_scores,
+            'transaction_count': len(stored_items),
+            'transaction_id': first_txn_id,  # backwards compat
+            'transactions': [
+                {
+                    'transaction_id': txn_id,
+                    'ledger_id': ld.ledger_id,
+                    'quantity': float(ld.quantity),
+                    'moisture': float(ld.moisture),
+                    'price': float(ld.price),
+                    'crop_type': ld.crop_type,
+                    'quality_grade': ld.quality_grade,
+                    'farmer_name': ld.farmer_name,
+                    'date': ld.date,
+                    'validation_status': 'valid' if vr.is_valid else 'needs_review',
+                    'fields_needing_review': vr.fields_needing_review,
+                    'confidence_scores': ld.confidence_scores,
+                }
+                for txn_id, ld, vr in stored_items
+            ],
             'whatsapp_sent': success
         }
-        
-        print(f"Successfully processed document: {transaction_id}")
-        
+
+        print(f"Successfully processed {len(stored_items)} item(s) from document")
+
+        # Notify FPO admin via SNS
+        try:
+            sns_topic_arn = os.environ.get('SNS_ALERT_TOPIC_ARN')
+            if sns_topic_arn:
+                sns_client = boto3.client('sns')
+                crop_summary = ", ".join(f"{ld.crop_type} ({ld.quantity}kg)" for _, ld, _ in stored_items)
+                sns_client.publish(
+                    TopicArn=sns_topic_arn,
+                    Subject=f"Ledger Processed - {len(stored_items)} item(s)",
+                    Message=(
+                        f"Ledger digitized successfully.\n\n"
+                        f"Items: {len(stored_items)}\n"
+                        f"Crops: {crop_summary}\n"
+                        f"Farmer: {first_ld.farmer_name}\n"
+                        f"Date: {first_ld.date}\n"
+                    )
+                )
+        except Exception as sns_err:
+            print(f"Failed to send SNS notification: {sns_err}")
+
         return {
             'statusCode': 200,
             'body': json.dumps(response_data)

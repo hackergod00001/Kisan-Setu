@@ -1,14 +1,42 @@
 # Dockerfile for building Lambda deployment packages
-# This ensures all dependencies are Linux-compatible
+# This ensures all dependencies are Linux-compatible and common/ is synced.
+#
+# Usage:
+#   docker build -f Dockerfile.lambda -t kisan-setu-builder .
+#   docker run --rm -v "$PWD/lambda:/output" kisan-setu-builder
+#
+# What it does:
+#   1. Installs pip dependencies for each Lambda from requirements.txt
+#   2. Copies common/ module into every Lambda directory
+#   3. Outputs everything back to your local lambda/ directory
 
+FROM public.ecr.aws/lambda/python:3.11 AS builder
+
+WORKDIR /build
+
+# Copy all Lambda source code
+COPY lambda/ /build/lambda/
+
+# Sync common/ into every Lambda directory and install requirements
+RUN set -e && \
+    for dir in /build/lambda/orchestrator /build/lambda/processor /build/lambda/voice \
+               /build/lambda/router /build/lambda/credit /build/lambda/satellite; do \
+        if [ -d "$dir" ]; then \
+            echo "==> Processing $(basename $dir)..." && \
+            # Sync common module
+            rm -rf "$dir/common" && \
+            cp -r /build/lambda/common "$dir/common" && \
+            # Install requirements if present
+            if [ -f "$dir/requirements.txt" ]; then \
+                pip install --no-cache-dir -r "$dir/requirements.txt" -t "$dir/" ; \
+            fi && \
+            echo "==> $(basename $dir) done" ; \
+        fi \
+    done
+
+# Copy built Lambda directories to output
 FROM public.ecr.aws/lambda/python:3.11
+COPY --from=builder /build/lambda/ /output/lambda/
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install -r requirements.txt -t /asset-output
-
-# Copy application code
-COPY . /asset-output/
-
-# Set working directory
-WORKDIR /asset-output
+# When run, copy output back to mounted volume
+CMD ["sh", "-c", "cp -r /output/lambda/* /lambda/ && echo 'Build complete! All Lambda packages ready with common/ synced.'"]

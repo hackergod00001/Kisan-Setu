@@ -1,3 +1,5 @@
+> **Note:** This is a historical spec document. The hackathon is "AI for Bharat Hackathon 2026 powered by AWS" (not "AWS AI Hackathon 2025"). All tasks in this spec have been completed.
+
 # Requirements Document: Hackathon Dashboard Deploy
 
 ## Introduction

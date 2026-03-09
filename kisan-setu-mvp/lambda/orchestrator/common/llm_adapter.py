@@ -90,41 +90,43 @@ class LLMAdapter:
 
     # Diverse fallback chain with multiple model providers
     # Using APAC inference profile IDs for ap-south-1 region
-    # Ordered by: capability → cost-effectiveness → availability
+    # Note: Claude APAC models require AWS Marketplace subscription.
+    # Nova models are prioritized as they are available without Marketplace actions.
     DEFAULT_FALLBACK_CHAIN = [
-        # Tier 1: Most capable (Claude 3.7 Sonnet — latest, multimodal)
-        ModelConfig(
-            model_id="apac.anthropic.claude-3-7-sonnet-20250219-v1:0",
-            max_tokens=1024,
-            temperature=0.7,
-            retry_attempts=2
-        ),
-        # Tier 2: Claude 3.5 Sonnet v2 (multimodal)
-        ModelConfig(
-            model_id="apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
-            max_tokens=1024,
-            temperature=0.7,
-            retry_attempts=2
-        ),
-        # Tier 3: AWS Nova Pro (multimodal)
+        # Tier 1: AWS Nova Pro (multimodal, available without Marketplace subscription)
         ModelConfig(
             model_id="apac.amazon.nova-pro-v1:0",
             max_tokens=1024,
             temperature=0.7,
             retry_attempts=2
         ),
-        # Tier 4: Fast and cheap fallbacks
-        ModelConfig(
-            model_id="apac.anthropic.claude-3-haiku-20240307-v1:0",
-            max_tokens=1024,
-            temperature=0.7,
-            retry_attempts=2
-        ),
+        # Tier 2: AWS Nova Lite (fast, cheap fallback)
         ModelConfig(
             model_id="apac.amazon.nova-lite-v1:0",
             max_tokens=1024,
             temperature=0.7,
             retry_attempts=2
+        ),
+        # Tier 3: Claude 3.7 Sonnet (if Marketplace subscription enabled)
+        ModelConfig(
+            model_id="apac.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            max_tokens=1024,
+            temperature=0.7,
+            retry_attempts=1
+        ),
+        # Tier 4: Claude 3.5 Sonnet v2 (if Marketplace subscription enabled)
+        ModelConfig(
+            model_id="apac.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            max_tokens=1024,
+            temperature=0.7,
+            retry_attempts=1
+        ),
+        # Tier 5: Claude 3 Haiku (if Marketplace subscription enabled)
+        ModelConfig(
+            model_id="apac.anthropic.claude-3-haiku-20240307-v1:0",
+            max_tokens=1024,
+            temperature=0.7,
+            retry_attempts=1
         ),
     ]
 

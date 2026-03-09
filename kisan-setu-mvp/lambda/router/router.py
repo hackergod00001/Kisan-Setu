@@ -245,7 +245,27 @@ def handle_meta_message(body: Dict[str, Any], request_id: str) -> Dict[str, Any]
         message_id = message.get('id')
         
         logger.info(f"[{request_id}] Meta message - Type: {message_type}, Sender: {sender}")
-        
+
+        # Deduplication: skip if we've already processed this message
+        try:
+            dedup_result = table.get_item(
+                Key={'PK': f'MSGID#{message_id}', 'SK': 'DEDUP'},
+                ProjectionExpression='PK'
+            )
+            if 'Item' in dedup_result:
+                logger.info(f"[{request_id}] Duplicate message {message_id}, skipping")
+                return response(200, {'status': 'duplicate'})
+            # Mark as processing (24-hour TTL)
+            from datetime import timedelta
+            table.put_item(Item={
+                'PK': f'MSGID#{message_id}',
+                'SK': 'DEDUP',
+                'timestamp': datetime.utcnow().isoformat(),
+                'ttl': int((datetime.utcnow() + timedelta(hours=24)).timestamp())
+            })
+        except Exception as dedup_err:
+            logger.debug(f"Dedup check failed (non-blocking): {dedup_err}")
+
         # Store message metadata
         timestamp = datetime.utcnow().isoformat()
         store_message_metadata(sender, message_id, timestamp, 'meta')
@@ -427,13 +447,17 @@ def route_to_voice_agent(
         logger.info(f"[{request_id}] Invoking VoiceAgent for {sender}")
         
         # Prepare payload
+        # Detect language from user profile
+        detected_lang = detect_user_language(sender)
+
         payload = {
             'action': 'transcribe',
             'sender_id': sender,
             'message_id': message_id,
             'audio_url': audio_url,
             'media_type': media_type,
-            'language': 'hi-IN'  # Default to Hindi, can be detected
+            'language': detected_lang,
+            'orchestrator_function': BEDROCK_ORCHESTRATOR_FUNCTION
         }
         
         # Invoke VoiceAgent asynchronously
@@ -485,11 +509,19 @@ def route_to_bedrock_orchestrator(
         logger.info(f"[{request_id}] Invoking BedrockOrchestrator for {sender}")
         
         # Prepare payload
+        # Detect language: prefer user profile, then detect from text
+        detected_lang = detect_user_language(sender)
+        if detected_lang == 'en':
+            # Profile not found or default, try detecting from text
+            text_lang = detect_language_from_text(text)
+            if text_lang != 'en':
+                detected_lang = text_lang
+
         payload = {
             'sender_id': sender,
             'message_id': message_id,
             'message_text': text,
-            'language': 'en'  # Can be detected from user profile
+            'language': detected_lang
         }
         
         # Invoke BedrockOrchestrator asynchronously
@@ -591,8 +623,37 @@ def detect_user_language(sender: str) -> str:
     except Exception as e:
         logger.debug(f"Could not detect language for {sender}: {e}")
 
-    # Default to Hindi for Indian farmers
-    return 'hi-IN'
+    # Default to English
+    return 'en'
+
+
+def detect_language_from_text(text: str) -> str:
+    """
+    Detect language from message text using Unicode script analysis.
+
+    Args:
+        text: Message text
+
+    Returns:
+        Language code (hi-IN, ta-IN, mr-IN, en)
+    """
+    if not text or not text.strip():
+        return 'en'
+
+    # Count characters by script
+    devanagari_count = sum(1 for c in text if '\u0900' <= c <= '\u097F')
+    tamil_count = sum(1 for c in text if '\u0B80' <= c <= '\u0BFF')
+    total = len(text.strip())
+
+    if total == 0:
+        return 'en'
+
+    if tamil_count / total > 0.3:
+        return 'ta-IN'
+    if devanagari_count / total > 0.3:
+        return 'hi-IN'
+
+    return 'en'
 
 
 def verify_webhook(event: Dict[str, Any]) -> Dict[str, Any]:
