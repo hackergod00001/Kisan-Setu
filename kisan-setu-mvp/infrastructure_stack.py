@@ -1043,11 +1043,14 @@ $util.toJson($ctx.result)
         )
 
         # Outputs
+        # Generate unique export name per environment
+        # prod: KisanSetuAlertTopicArn, dev: KisanSetuDevAlertTopicArn, staging: KisanSetuStagingAlertTopicArn
+        env_suffix = environment.capitalize() if environment != "prod" else ""
         CfnOutput(
             self, "SNSAlertTopicArn",
             value=alert_topic.topic_arn,
             description=f"SNS Topic ARN for critical error alerts ({environment})",
-            export_name=f"KisanSetu{env_prefix.replace('-', '')}AlertTopicArn"
+            export_name=f"KisanSetu{env_suffix}AlertTopicArn"
         )
 
     def _create_lambda_role(self, name, extra_policies=None):
