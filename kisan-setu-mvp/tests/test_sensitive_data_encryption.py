@@ -23,7 +23,7 @@ from common.encryption import (
     decrypt_sensitive_fields,
     SENSITIVE_FIELDS
 )
-from tests.generators import (
+from generators import (
     transaction_data,
     farmer_data,
     fpo_data,

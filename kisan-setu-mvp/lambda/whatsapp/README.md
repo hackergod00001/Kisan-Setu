@@ -1,63 +1,110 @@
 # WhatsApp Interface Component
 
-This directory contains the WhatsApp Interface Component for the Kisan-Setu system, using Meta WhatsApp Business API.
+## Overview
+
+This directory contains the WhatsApp Interface Component for Kisan-Setu, using Meta WhatsApp Business Cloud API (v18.0). The primary class `MetaWhatsAppInterface` handles all WhatsApp communication. Webhook handling is done by the MessageRouter Lambda (`lambda/router/router.py`).
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph WhatsAppModule["WhatsApp Module"]
+        META_IF["MetaWhatsAppInterface<br/>(meta_whatsapp_interface.py)"]
+    end
+
+    subgraph Consumers["Used By"]
+        ROUTER["MessageRouter<br/>(webhook verification)"]
+        DOC["DocumentProcessor<br/>(send ledger response)"]
+        VOICE["VoiceHandler<br/>(send transcription confirmation)"]
+        ORCH["BedrockOrchestrator<br/>(send AI response)"]
+    end
+
+    subgraph External["External"]
+        SM["Secrets Manager<br/>kisan-setu/whatsapp/credentials"]
+        META_API["Meta Graph API<br/>(v17.0)"]
+        META_CDN["WhatsApp CDN<br/>(media download)"]
+    end
+
+    ROUTER --> META_IF
+    DOC --> META_IF
+    VOICE --> META_IF
+    ORCH --> META_IF
+    META_IF --> SM
+    META_IF --> META_API
+    META_IF --> META_CDN
+```
 
 ## Components
 
-### 1. `meta_whatsapp_interface.py`
-The main MetaWhatsAppInterface class that handles all WhatsApp communication via Meta WhatsApp Business Cloud API.
+### `meta_whatsapp_interface.py`
 
-**Key Features:**
-- **Message Sending**: Send text responses via Meta Graph API
-- **Media Download**: Download images and voice messages from WhatsApp
-- **Multilingual Support**: Error messages in English, Hindi, Marathi, and Tamil
-- **Credentials Management**: Load credentials from AWS Secrets Manager
+The main `MetaWhatsAppInterface` class that handles all WhatsApp communication.
 
-**Methods:**
-- `send_message(phone_number, message)`: Send text message via Meta API
-- `download_media(media_id)`: Download media (images/voice) from WhatsApp
-- `get_fallback_response(language)`: Get localized fallback error message
+**Capabilities:**
+- **Credential loading**: From AWS Secrets Manager (`kisan-setu/whatsapp/credentials`) with env var fallback
+- **Send text**: `send_text_response(phone, message, language)` via Meta Graph API (v18.0)
+- **Send voice**: `send_voice_response(phone, audio_url)` for audio responses
+- **Send image**: `send_image(phone, image_url, caption)` for image messages
+- **Send document**: `send_document(phone, document_url, caption, filename)` for PDFs/Excel
+- **Receive message**: `receive_message(webhook_payload)` — parse Meta webhook into `WhatsAppMessage` objects
+- **Media download**: `download_media(media_id)` — fetch images/audio from WhatsApp CDN, upload to S3
+- **Multilingual fallback**: Welcome messages and error messages in English, Hindi, Marathi, Tamil
+- **Rate limit handling**: Detection of Meta API rate limit errors (codes 4, 80007)
+- **Formatting**: Tables (`format_table`), numbered/bullet lists (`format_list`), structured data (`format_structured_data`)
 
-### 2. `webhook_handler.py`
-Lambda function that receives WhatsApp webhooks and routes messages to appropriate components.
+> **Note**: `webhook_handler.py` was removed in Phase 5 cleanup. All webhook handling is done by MessageRouter (`lambda/router/router.py`).
 
-**Routing Logic:**
-- **Image messages** → DocumentProcessor Lambda (for ledger digitization)
-- **Voice/Audio messages** → VoiceAgent Lambda (for transcription and processing)
-- **Text messages** → BedrockOrchestrator Lambda (for AI-powered responses)
+## Message Flow
 
-## Environment Variables
+```mermaid
+sequenceDiagram
+    participant User as 📱 WhatsApp User
+    participant Meta as Meta Cloud API
+    participant APIGW as API Gateway
+    participant Router as MessageRouter
+    participant Lambda as Downstream Lambda
+    participant WA_IF as MetaWhatsAppInterface
+    participant Meta2 as Meta Graph API
 
-- `DYNAMODB_TABLE`: DynamoDB table name for storing messages
-- `DOCUMENT_PROCESSOR_FUNCTION`: Lambda function name for document processing
-- `VOICE_AGENT_FUNCTION`: Lambda function name for voice processing
-- `BEDROCK_ORCHESTRATOR_FUNCTION`: Lambda function name for text processing
-- `WEBHOOK_VERIFY_TOKEN`: Token for webhook verification (kisan-setu-verify-2026)
-- `WHATSAPP_SECRET_NAME`: AWS Secrets Manager secret name for WhatsApp credentials
+    User->>Meta: Send message
+    Meta->>APIGW: POST /webhook
+    APIGW->>Router: Invoke
+    Router->>Lambda: Async invoke (DocProc/Voice/Orch)
+    Lambda->>WA_IF: Create interface instance
+    WA_IF->>WA_IF: Load credentials from Secrets Manager
+    WA_IF->>Meta2: POST /v18.0/{phone_id}/messages
+    Meta2->>User: Deliver response
+```
 
 ## WhatsApp Credentials
 
-Credentials are stored in AWS Secrets Manager (`kisan-setu/whatsapp/credentials`):
+Stored in AWS Secrets Manager (`kisan-setu/whatsapp/credentials`):
 
 ```json
 {
-  "PHONE_NUMBER_ID": "your_phone_number_id",
+  "PHONE_NUMBER_ID": "1043444535519617",
   "ACCESS_TOKEN": "your_access_token",
   "VERIFY_TOKEN": "kisan-setu-verify-2026"
 }
 ```
 
-## Usage
+## Environment Variables
 
-```python
-from meta_whatsapp_interface import MetaWhatsAppInterface
-
-whatsapp = MetaWhatsAppInterface()
-whatsapp.send_message("919876543210", "Your ledger has been processed!")
-```
+| Variable | Purpose |
+|----------|---------|
+| `WHATSAPP_SECRET_NAME` | Secrets Manager secret name (`kisan-setu/whatsapp/credentials`) |
+| `WEBHOOK_VERIFY_TOKEN` | Webhook verification token (`kisan-setu-verify-2026`) |
 
 ## Testing
 
 ```bash
 pytest tests/test_webhook_handler.py -v
 ```
+
+## Consumers
+
+The `MetaWhatsAppInterface` class is used by multiple Lambda functions (each has its own copy in `common/`):
+- **MessageRouter** — webhook verification, media download
+- **DocumentProcessor** — send ledger extraction results directly to user
+- **VoiceHandler** — send transcription confirmation
+- **BedrockOrchestrator** — send AI responses

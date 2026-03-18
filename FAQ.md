@@ -3,7 +3,7 @@
 ## 🚀 Getting Started
 
 ### Q: What is Kisan-Setu?
-**A**: Kisan-Setu is a WhatsApp-based agricultural assistant for Indian farmers. It uses AWS Bedrock (Claude AI), Textract for document digitization, and provides features like credit scoring, satellite crop analysis, and voice support in multiple Indian languages.
+**A**: Kisan-Setu is a WhatsApp-based agricultural assistant for Indian farmers and FPOs. It uses AWS Bedrock with a 5-model APAC inference profile fallback chain (Nova Pro, Nova Lite, Claude 3.7 Sonnet, Claude 3.5 Sonnet v2, Claude 3 Haiku), Amazon Textract for document digitization, and provides features like credit scoring (0-100), satellite crop analysis (NDVI via SageMaker Geospatial), and voice support in Hindi, Marathi, and Tamil.
 
 ### Q: What do I need to get started?
 **A**: You need:
@@ -254,19 +254,20 @@ Accuracy depends on image quality.
 ## 💳 Credit Scoring
 
 ### Q: How is credit score calculated?
-**A**: Based on:
-- Transaction history (40%)
-- Payment regularity (30%)
-- Crop diversity (15%)
-- Land size (10%)
-- Other factors (5%)
+**A**: The credit score is a 0-100 reliability score based on 5 weighted components:
+- Supply Consistency (30 points): Frequency, adherence, fulfillment
+- Quality Metrics (25 points): Moisture, grade consistency, rejection rate
+- Transaction History (20 points): Volume, relationship length, success rate
+- Financial Behavior (15 points): Payment timeliness, outstanding dues
+- Operational Transparency (10 points): Digitization rate, data completeness
 
 ### Q: What's a good credit score?
-**A**: 
-- 750-850: Excellent
-- 650-749: Good
-- 550-649: Fair
-- Below 550: Poor
+**A**: Score is 0-100:
+- 90-100: Excellent
+- 75-89: Good
+- 60-74: Fair
+- 40-59: Poor
+- Below 40: Very Poor
 
 ### Q: Can farmers see their credit score?
 **A**: Yes! They can ask via WhatsApp:
@@ -481,24 +482,83 @@ aws sns subscribe \
 ## 🚀 Production Readiness
 
 ### Q: Is this production-ready?
-**A**: Yes, but consider:
+**A**: Yes! Phase 6 production hardening is complete:
 - ✅ All core features implemented
 - ✅ Error handling and logging
-- ✅ Security best practices
-- ✅ Comprehensive tests
-- ⚠️ Need to set up monitoring dashboards
-- ⚠️ Need to configure backup strategy
-- ⚠️ Need to set up CI/CD pipeline
+- ✅ Security best practices (per-function IAM roles)
+- ✅ Comprehensive tests (633 passed)
+- ✅ CloudWatch alarms (18 total) with SNS alerting
+- ✅ DynamoDB Point-in-Time Recovery enabled
+- ✅ Provisioned concurrency on critical Lambdas
+- ✅ Live dashboard with real API data
+- ⚠️ Need to configure WhatsApp webhook
+- ⚠️ Need to set up CI/CD pipeline for your environment
 
 ### Q: What's missing for production?
 **A**: 
 1. ~~Admin dashboard~~ ✅ Now implemented (S3-hosted static dashboard with live message feed, credit charts, NDVI map, ledger preview)
-2. Monitoring dashboards
-3. Backup and disaster recovery
+2. ~~Monitoring dashboards~~ ✅ 18 CloudWatch alarms configured
+3. ~~Backup and disaster recovery~~ ✅ DynamoDB PITR enabled (35-day restore)
 4. Load testing
 5. Performance optimization
 6. Cost optimization
 7. Documentation for farmers
+
+### Q: What are the CloudWatch alarms monitoring?
+**A**: 18 alarms total:
+- **Lambda Errors** (8 alarms): One per Lambda function, triggers when errors > 0 in a 5-minute window
+- **Lambda Throttles** (8 alarms): One per Lambda function, triggers when throttles > 0 in a 5-minute window
+- **API Gateway 5xx** (1 alarm): Triggers on any server error
+- **API Gateway p99 Latency** (1 alarm): Triggers when p99 latency exceeds 10 seconds
+
+All alarms notify the `kisan-setu-critical-alerts` SNS topic. Add email alerts with:
+```bash
+cdk deploy -c alert_email=your-email@example.com
+```
+
+### Q: What is provisioned concurrency and why is it configured?
+**A**: Provisioned concurrency keeps Lambda instances warm to eliminate cold starts. It's configured on:
+- **Router Lambda** (PC=2): First function hit by every WhatsApp message
+- **Orchestrator Lambda** (PC=2): Handles all AI-powered responses
+
+This ensures sub-second response times for the critical message path. Other Lambdas use on-demand concurrency since they're invoked less frequently.
+
+### Q: What is DynamoDB Point-in-Time Recovery (PITR)?
+**A**: PITR allows you to restore the DynamoDB table to any second within the last 35 days. Useful for:
+- Accidental data deletion
+- Data corruption recovery
+- Audit and compliance
+
+Enabled automatically via CDK. To restore manually:
+```bash
+aws dynamodb restore-table-to-point-in-time \
+  --source-table-name KisanSetuData \
+  --target-table-name KisanSetuData-Restored \
+  --restore-date-time 2026-03-15T12:00:00Z \
+  --region ap-south-1
+```
+
+### Q: How are IAM roles structured?
+**A**: Each of the 8 Lambda functions has its own IAM role with least-privilege permissions:
+- All roles include `AWSLambdaBasicExecutionRole` (CloudWatch Logs)
+- DynamoDB permissions scoped to `KisanSetuData` table ARN (not `*`)
+- S3 permissions scoped to specific bucket ARNs (not `*`)
+- Each role only includes the services that function actually calls (e.g., only DocumentProcessor has Textract permissions)
+
+### Q: How does the live dashboard work?
+**A**: The dashboard fetches real data from the API Gateway:
+- Farmer locations + NDVI data for the satellite map
+- Credit score history for the trend chart
+- Recent WhatsApp messages for the live feed
+
+It polls every 5 seconds for new messages and includes error/retry handling. All API calls include the `x-api-key` header for authentication.
+
+### Q: Is the seed script safe to re-run?
+**A**: Yes! The seed script uses conditional writes (`attribute_not_exists(PK)`) so:
+- Existing items are never overwritten
+- Skipped items are logged
+- A summary shows created vs skipped counts
+- No errors on duplicate runs
 
 ### Q: How many users can it handle?
 **A**: 
@@ -541,4 +601,4 @@ Bottlenecks:
 
 ---
 
-**Last Updated**: March 2026
+**Last Updated**: March 15, 2026

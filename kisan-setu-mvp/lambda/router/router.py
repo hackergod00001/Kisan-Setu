@@ -16,15 +16,22 @@ Components:
     - DocumentProcessor: Handles image messages (ledgers)
     - VoiceAgent: Handles voice/audio messages
     - BedrockOrchestrator: Handles text messages and complex queries
+
+AUDIT TRAIL GAP: This handler performs direct boto3 DynamoDB writes (message
+metadata, dedup markers, rate-limit counters, status updates) that bypass the
+centralised DynamoDBAccess class and its audit trails. To close this gap,
+either migrate write paths to DynamoDBAccess or enable DynamoDB Streams on the
+KisanSetuData table to capture all mutations for audit/compliance purposes.
 """
 
 import json
 import boto3
 import os
+import re
 import sys
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from urllib.parse import parse_qs
 
 # Add parent directory to path for imports
@@ -63,8 +70,6 @@ REGION = os.environ.get('REGION', 'ap-south-1')
 PROCESSOR_FUNCTION_NAME = os.environ.get('PROCESSOR_FUNCTION_NAME', 'DocumentProcessor')
 VOICE_AGENT_FUNCTION = os.environ.get('VOICE_AGENT_FUNCTION', 'VoiceHandler')
 BEDROCK_ORCHESTRATOR_FUNCTION = os.environ.get('BEDROCK_ORCHESTRATOR_FUNCTION', 'BedrockOrchestrator')
-CREDIT_CALCULATOR_FUNCTION = os.environ.get('CREDIT_CALCULATOR_FUNCTION', 'CreditCalculator')
-SATELLITE_ANALYZER_FUNCTION = os.environ.get('SATELLITE_ANALYZER_FUNCTION', 'SatelliteAnalyzer')
 
 # WhatsApp configuration
 WEBHOOK_VERIFY_TOKEN = os.environ.get('WEBHOOK_VERIFY_TOKEN', 'kisan-setu-verify-token')
@@ -83,6 +88,164 @@ COMPONENTS_INITIALIZED = {
     'lambda': False,
     'sns': False
 }
+
+# Input sanitization constants
+MAX_MESSAGE_LENGTH = 2000
+
+# Rate limiting constants (Req 2.9)
+RATE_LIMIT_MAX_MESSAGES = 10  # max messages per window
+RATE_LIMIT_WINDOW_SECONDS = 60  # 1-minute window
+
+# Prompt injection patterns (case-insensitive)
+PROMPT_INJECTION_PATTERNS = [
+    r'ignore\s+(all\s+)?previous\s+instructions',
+    r'ignore\s+(all\s+)?prior\s+instructions',
+    r'disregard\s+(all\s+)?previous\s+instructions',
+    r'disregard\s+(all\s+)?prior\s+instructions',
+    r'forget\s+your\s+instructions',
+    r'forget\s+(all\s+)?previous\s+instructions',
+    r'you\s+are\s+now\b',
+    r'act\s+as\s+if\s+you\s+are',
+    r'pretend\s+you\s+are',
+    r'system\s*prompt',
+    r'override\s+(your\s+)?(system|instructions)',
+    r'new\s+instructions?\s*:',
+    r'reveal\s+your\s+(system\s+)?prompt',
+    r'show\s+your\s+(system\s+)?prompt',
+    r'what\s+are\s+your\s+instructions',
+]
+
+# Compile patterns for efficiency
+_INJECTION_REGEX = re.compile(
+    '|'.join(PROMPT_INJECTION_PATTERNS),
+    re.IGNORECASE
+)
+
+
+def validate_message_length(text: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check that message text does not exceed the maximum allowed length.
+
+    Args:
+        text: The raw message text.
+
+    Returns:
+        Tuple of (is_valid, rejection_reason). rejection_reason is None when valid.
+    """
+    if len(text) > MAX_MESSAGE_LENGTH:
+        return False, (
+            f"Your message is too long ({len(text)} characters). "
+            f"Please keep messages under {MAX_MESSAGE_LENGTH} characters."
+        )
+    return True, None
+
+
+def detect_prompt_injection(text: str) -> Tuple[bool, Optional[str]]:
+    """
+    Detect known prompt injection patterns in the message text.
+
+    Args:
+        text: The raw message text.
+
+    Returns:
+        Tuple of (is_safe, rejection_reason). rejection_reason is None when safe.
+    """
+    if _INJECTION_REGEX.search(text):
+        return False, "Sorry, your message could not be processed. Please rephrase and try again."
+    return True, None
+
+
+def sanitize_text(text: str) -> str:
+    """
+    Sanitize special characters in message text before passing to the orchestrator.
+
+    Removes or escapes characters that could interfere with LLM prompt
+    processing while preserving normal multilingual text (Devanagari, Tamil, etc.).
+
+    Args:
+        text: The raw message text.
+
+    Returns:
+        Sanitized text safe for LLM prompt inclusion.
+    """
+    # Remove null bytes
+    text = text.replace('\0', '')
+
+    # Remove other ASCII control characters (keep newline, tab, carriage return)
+    text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+    # Collapse excessive whitespace (more than 3 consecutive newlines → 2)
+    text = re.sub(r'\n{4,}', '\n\n\n', text)
+
+    # Strip leading/trailing whitespace
+    text = text.strip()
+
+    return text
+
+
+def check_rate_limit(sender: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check per-sender rate limit using DynamoDB atomic counters with TTL.
+
+    Uses a single DynamoDB item per sender with an atomic counter that
+    resets each minute via TTL. The counter is incremented atomically
+    using ``ADD`` so concurrent requests are safe.
+
+    Args:
+        sender: Phone number (e.g. "+919876543210").
+
+    Returns:
+        Tuple of (is_allowed, rejection_message).
+        ``rejection_message`` is ``None`` when the request is allowed.
+
+    Implements: Requirement 2.9 — per-sender rate limiting.
+    """
+    import time
+    import math
+
+    now = time.time()
+    # TTL: end of the current 60-second window
+    window_start = int(now // RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS
+    window_ttl = int(window_start + RATE_LIMIT_WINDOW_SECONDS + RATE_LIMIT_WINDOW_SECONDS)
+    # Use a partition key that includes the window so counters auto-reset
+    window_key = str(int(window_start))
+
+    try:
+        # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
+        result = table.update_item(
+            Key={
+                'PK': f'RATELIMIT#{sender}',
+                'SK': f'WINDOW#{window_key}',
+            },
+            UpdateExpression='ADD msg_count :inc SET #ttl = if_not_exists(#ttl, :ttl)',
+            ExpressionAttributeNames={
+                '#ttl': 'ttl',
+            },
+            ExpressionAttributeValues={
+                ':inc': 1,
+                ':ttl': window_ttl,
+            },
+            ReturnValues='ALL_NEW',
+        )
+
+        count = int(result['Attributes'].get('msg_count', 1))
+
+        if count > RATE_LIMIT_MAX_MESSAGES:
+            logger.warning(
+                f"Rate limit exceeded for {sender}: {count}/{RATE_LIMIT_MAX_MESSAGES} in window {window_key}"
+            )
+            return False, (
+                "You're sending messages too quickly. "
+                "Please wait a moment before sending another message."
+            )
+
+        return True, None
+
+    except Exception as e:
+        # Fail open — if rate-limit check fails, allow the message through
+        logger.error(f"Rate limit check failed for {sender}: {e}")
+        return True, None
 
 
 def initialize_components():
@@ -248,6 +411,8 @@ def handle_meta_message(body: Dict[str, Any], request_id: str) -> Dict[str, Any]
 
         # Deduplication: skip if we've already processed this message
         try:
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             dedup_result = table.get_item(
                 Key={'PK': f'MSGID#{message_id}', 'SK': 'DEDUP'},
                 ProjectionExpression='PK'
@@ -256,6 +421,8 @@ def handle_meta_message(body: Dict[str, Any], request_id: str) -> Dict[str, Any]
                 logger.info(f"[{request_id}] Duplicate message {message_id}, skipping")
                 return response(200, {'status': 'duplicate'})
             # Mark as processing (24-hour TTL)
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             from datetime import timedelta
             table.put_item(Item={
                 'PK': f'MSGID#{message_id}',
@@ -265,6 +432,16 @@ def handle_meta_message(body: Dict[str, Any], request_id: str) -> Dict[str, Any]
             })
         except Exception as dedup_err:
             logger.debug(f"Dedup check failed (non-blocking): {dedup_err}")
+
+        # Per-sender rate limiting (Req 2.9)
+        is_allowed, rate_limit_msg = check_rate_limit(sender)
+        if not is_allowed:
+            logger.warning(f"[{request_id}] Rate limit exceeded for {sender}")
+            return response(200, {
+                'status': 'rate_limited',
+                'message': rate_limit_msg,
+                'request_id': request_id
+            })
 
         # Store message metadata
         timestamp = datetime.utcnow().isoformat()
@@ -341,6 +518,8 @@ def store_message_metadata(sender: str, message_id: str, timestamp: str, source:
         conversation_key = f"CONVERSATION#{sender}"
         message_key = f"MSG#{timestamp}"
         
+        # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
         table.put_item(Item={
             'PK': conversation_key,
             'SK': message_key,
@@ -494,7 +673,13 @@ def route_to_bedrock_orchestrator(
     """
     Route text message to BedrockOrchestrator Lambda.
     
+    Applies input sanitization before forwarding:
+    1. Max message length check (2000 chars)
+    2. Prompt injection detection
+    3. Special character sanitization
+    
     Implements: Requirement 6.1, 7.1 - Route text to BedrockOrchestrator
+    Implements: Requirement 2.8 - Input sanitization
     
     Args:
         sender: Phone number
@@ -506,6 +691,33 @@ def route_to_bedrock_orchestrator(
         API Gateway response
     """
     try:
+        # --- Input sanitization (Req 2.8) ---
+
+        # 2.4.1: Max message length check
+        is_valid, rejection_msg = validate_message_length(text)
+        if not is_valid:
+            logger.warning(f"[{request_id}] Message rejected: too long ({len(text)} chars) from {sender}")
+            return response(200, {
+                'status': 'rejected',
+                'reason': 'message_too_long',
+                'message': rejection_msg,
+                'request_id': request_id
+            })
+
+        # 2.4.2: Prompt injection detection
+        is_safe, rejection_msg = detect_prompt_injection(text)
+        if not is_safe:
+            logger.warning(f"[{request_id}] Message rejected: prompt injection detected from {sender}")
+            return response(200, {
+                'status': 'rejected',
+                'reason': 'prompt_injection_detected',
+                'message': rejection_msg,
+                'request_id': request_id
+            })
+
+        # 2.4.3: Special character sanitization
+        text = sanitize_text(text)
+
         logger.info(f"[{request_id}] Invoking BedrockOrchestrator for {sender}")
         
         # Prepare payload
@@ -559,6 +771,8 @@ def update_message_status(sender: str, message_id: str, status: str):
         status: New status
     """
     try:
+        # NOTE: Direct boto3 DynamoDB calls — bypass DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
         # Query for the message
         response_obj = table.query(
             KeyConditionExpression='PK = :pk',
@@ -604,6 +818,8 @@ def detect_user_language(sender: str) -> str:
         Language code (hi-IN, mr-IN, ta-IN, en)
     """
     try:
+        # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
         result = table.get_item(
             Key={
                 'PK': f"FARMER#{sender}",

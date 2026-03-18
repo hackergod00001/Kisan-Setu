@@ -153,7 +153,10 @@ def test_property_3_structured_ledger_extraction(image_url, mock_response):
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data(image_url, language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Property 1: Output is a LedgerData object (can be serialized to JSON)
     assert isinstance(ledger_data, LedgerData), \
         "Output should be a LedgerData object"
@@ -287,7 +290,10 @@ def test_property_3_json_output_structure(image_url, mock_response):
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data(image_url, language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Convert to JSON
     ledger_dict = {
         'ledger_id': ledger_data.ledger_id,
@@ -461,7 +467,10 @@ def test_property_3_confidence_score_completeness(image_url):
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data(image_url, language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Property: Every field should have a confidence score
     field_mapping = {
         'quantity': 'QUANTITY',
@@ -514,7 +523,10 @@ def test_empty_textract_response():
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data('s3://test/image.jpg', language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Should still return a LedgerData object with default values
     assert isinstance(ledger_data, LedgerData)
     assert ledger_data.quantity == 0.0
@@ -554,7 +566,10 @@ def test_missing_confidence_scores():
     )
     
     ledger_data = processor.extract_ledger_data('s3://test/image.jpg', language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Should have a confidence score (default to 0)
     assert 'QUANTITY' in ledger_data.confidence_scores
     assert ledger_data.confidence_scores['QUANTITY'] == 0
@@ -592,7 +607,10 @@ def test_non_numeric_values():
     )
     
     ledger_data = processor.extract_ledger_data('s3://test/image.jpg', language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Should convert to 0.0 for non-numeric values
     assert ledger_data.quantity == 0.0
 
@@ -733,7 +751,10 @@ def test_property_5_low_confidence_field_flagging(image_url, mock_response):
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data(image_url, language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Validate extraction (this populates fields_needing_review)
     validation_result = processor.validate_extraction(ledger_data)
     
@@ -918,10 +939,13 @@ def test_property_5_exact_threshold_boundary(image_url):
     
     # Extract ledger data
     ledger_data = processor.extract_ledger_data(image_url, language='en')
-    
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
+
     # Validate extraction
     validation_result = processor.validate_extraction(ledger_data)
-    
+
     # Property 1: Fields at exactly 70.0 should NOT be flagged
     assert 'QUANTITY' not in ledger_data.fields_needing_review, \
         "QUANTITY with confidence 70.0 should NOT be flagged"
@@ -1075,8 +1099,11 @@ def test_property_5_all_fields_low_confidence(image_url):
     
     # Extract and validate
     ledger_data = processor.extract_ledger_data(image_url, language='en')
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
     validation_result = processor.validate_extraction(ledger_data)
-    
+
     # Property 1: All 7 fields should be flagged
     all_fields = {'QUANTITY', 'MOISTURE', 'PRICE', 'DATE', 'FARMER_NAME', 'CROP_TYPE', 'QUALITY_GRADE'}
     assert len(ledger_data.fields_needing_review) == 7, \
@@ -1214,8 +1241,11 @@ def test_property_5_no_fields_low_confidence(image_url):
     
     # Extract and validate
     ledger_data = processor.extract_ledger_data(image_url, language='en')
+    assert isinstance(ledger_data, list) and len(ledger_data) > 0, \
+        "Output should be a non-empty list of LedgerData objects"
+    ledger_data = ledger_data[0]
     validation_result = processor.validate_extraction(ledger_data)
-    
+
     # Property 1: fields_needing_review should be empty
     assert len(ledger_data.fields_needing_review) == 0, \
         f"Expected no fields to be flagged, got {ledger_data.fields_needing_review}"

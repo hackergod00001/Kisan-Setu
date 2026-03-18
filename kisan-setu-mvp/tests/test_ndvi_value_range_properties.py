@@ -120,18 +120,18 @@ def test_property_8_ndvi_value_range_validity(satellite_image, b4_value, b8_valu
         dynamodb_table=mock_table
     )
     
-    # Mock the _simulate_ndvi_calculation to use actual band values
-    def mock_ndvi_calc(b4_url, b8_url):
+    # Mock _compute_ndvi_from_cog to use actual band values
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords):
         # Calculate NDVI using the formula: (B8 - B4) / (B8 + B4)
         numerator = b8_value - b4_value
         denominator = b8_value + b4_value
-        
+
         if denominator == 0:
             return 0.0  # Handle edge case
-        
+
         return numerator / denominator
-    
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         # Calculate NDVI
         ndvi_result = analyzer.calculate_ndvi(satellite_image)
         
@@ -282,12 +282,12 @@ def test_edge_case_equal_bands():
     )
     
     # Mock equal band values
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 5000.0
         b8 = 5000.0
         return (b8 - b4) / (b8 + b4)  # Should be 0
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # NDVI should be 0 when bands are equal
@@ -322,12 +322,12 @@ def test_edge_case_maximum_ndvi():
     )
     
     # Mock B4=0, B8>0
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 0.0
         b8 = 10000.0
         return (b8 - b4) / (b8 + b4)  # Should be 1
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # NDVI should be 1 when B4 = 0
@@ -362,12 +362,12 @@ def test_edge_case_minimum_ndvi():
     )
     
     # Mock B8=0, B4>0
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 10000.0
         b8 = 0.0
         return (b8 - b4) / (b8 + b4)  # Should be -1
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # NDVI should be -1 when B8 = 0
@@ -402,12 +402,12 @@ def test_edge_case_healthy_vegetation():
     )
     
     # Mock typical healthy vegetation values
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 2000.0  # Lower red reflectance
         b8 = 8000.0  # Higher NIR reflectance
         return (b8 - b8) / (b8 + b4)  # Should be ~0.6
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # Should be in valid range
@@ -443,12 +443,12 @@ def test_edge_case_bare_soil():
     )
     
     # Mock bare soil values (similar red and NIR)
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 4500.0
         b8 = 5500.0
         return (b8 - b4) / (b8 + b4)  # Should be ~0.1
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # Should be in valid range
@@ -480,12 +480,12 @@ def test_edge_case_water():
     )
     
     # Mock water values (higher red than NIR)
-    def mock_ndvi_calc(b4_url, b8_url):
+    def mock_ndvi_calc(b4_url, b8_url, gps_coords=None):
         b4 = 6000.0
         b8 = 3000.0
         return (b8 - b4) / (b8 + b4)  # Should be negative
     
-    with patch.object(analyzer, '_simulate_ndvi_calculation', side_effect=mock_ndvi_calc):
+    with patch.object(analyzer, '_compute_ndvi_from_cog', side_effect=mock_ndvi_calc):
         result = analyzer.calculate_ndvi(satellite_image)
         
         # Should be in valid range

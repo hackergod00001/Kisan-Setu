@@ -11,8 +11,9 @@ from decimal import Decimal
 from unittest.mock import Mock, MagicMock, patch
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'lambda'))
+sys.path.insert(0, os.path.dirname(__file__))
 
-from sync.sync_manager import SyncManager, SyncResult, OfflineTransaction
+from lib.sync_manager import SyncManager, SyncResult, OfflineTransaction
 from common.models import Transaction, SyncStatus
 
 

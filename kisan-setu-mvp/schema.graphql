@@ -99,7 +99,7 @@ type FarmerConnection {
 type Mutation {
   createTransaction(input: TransactionInput!): Transaction
   syncOfflineTransactions(transactions: [TransactionInput!]!): SyncResult
-  updateTransaction(transactionId: ID!, input: TransactionInput!): Transaction
+  updateTransaction(input: TransactionInput!): Transaction
 }
 
 schema {

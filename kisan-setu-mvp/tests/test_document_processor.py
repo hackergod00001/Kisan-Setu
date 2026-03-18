@@ -183,23 +183,25 @@ class TestDocumentProcessor:
         image_url = 's3://kisan-setu-raw/ledger-images/+919876543210/2024-01-15.jpg'
         result = processor.extract_ledger_data(image_url, language='en')
         
-        # Verify
+        # extract_ledger_data returns a list of ledger items
         assert result is not None
-        assert result.quantity == 100.0
-        assert result.moisture == 12.5
-        assert result.price == 2500.0
-        assert result.crop_type == 'onion'
-        assert result.date == '2024-01-15'
-        assert result.farmer_name == 'Ramesh Kumar'
-        assert result.quality_grade == 'A'
-        assert result.farmer_id == 'FARMER#+919876543210'
-        assert result.image_url == image_url
+        assert len(result) >= 1
+        item = result[0]
+        assert item.quantity == 100.0
+        assert item.moisture == 12.5
+        assert item.price == 2500.0
+        assert item.crop_type == 'onion'
+        assert item.date == '2024-01-15'
+        assert item.farmer_name == 'Ramesh Kumar'
+        assert item.quality_grade == 'A'
+        assert item.farmer_id == 'FARMER#+919876543210'
+        assert item.image_url == image_url
         
         # Verify confidence scores
-        assert result.confidence_scores['QUANTITY'] == 95.5
-        assert result.confidence_scores['MOISTURE'] == 88.0
-        assert result.confidence_scores['PRICE'] == 92.0
-        assert result.confidence_scores['CROP_TYPE'] == 85.0
+        assert item.confidence_scores['QUANTITY'] == 95.5
+        assert item.confidence_scores['MOISTURE'] == 88.0
+        assert item.confidence_scores['PRICE'] == 92.0
+        assert item.confidence_scores['CROP_TYPE'] == 85.0
         
         # Verify Textract was called correctly
         mock_textract_client.analyze_document.assert_called_once()
@@ -215,7 +217,8 @@ class TestDocumentProcessor:
         result = processor.extract_ledger_data(image_url, language='hi-IN')
         
         assert result is not None
-        assert result.quantity == 100.0
+        assert len(result) >= 1
+        assert result[0].quantity == 100.0
         # Textract automatically detects Hindi script
         mock_textract_client.analyze_document.assert_called_once()
     
@@ -238,7 +241,8 @@ class TestDocumentProcessor:
         result = processor.extract_ledger_data(s3_key)
         
         assert result is not None
-        assert result.quantity == 100.0
+        assert len(result) >= 1
+        assert result[0].quantity == 100.0
     
     def test_extract_ledger_data_missing_fields(self, processor, mock_textract_client):
         """Test extraction with missing fields."""
@@ -266,9 +270,10 @@ class TestDocumentProcessor:
         
         # Should still return result with default values for missing fields
         assert result is not None
-        assert result.quantity == 100.0
-        assert result.crop_type == 'unknown'  # default value
-        assert result.moisture == 0.0  # default value
+        assert len(result) >= 1
+        assert result[0].quantity == 100.0
+        assert result[0].crop_type == 'unknown'  # default value
+        assert result[0].moisture == 0.0  # default value
     
     # ==================== Test validate_extraction ====================
     

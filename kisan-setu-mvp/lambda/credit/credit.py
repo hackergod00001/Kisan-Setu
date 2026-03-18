@@ -1,6 +1,12 @@
 """
 Credit Calculator Lambda
 Calculates farmer reliability scores based on transaction history
+
+AUDIT TRAIL GAP: This handler performs direct boto3 DynamoDB writes (credit
+score storage, transaction queries) that bypass the centralised DynamoDBAccess
+class and its audit trails. To close this gap, either migrate write paths to
+DynamoDBAccess or enable DynamoDB Streams on the KisanSetuData table to capture
+all mutations for audit/compliance purposes.
 """
 
 import json
@@ -269,6 +275,8 @@ class CreditEngine:
         """Get all transactions for a farmer."""
         try:
             pk = self._ensure_pk_prefix(farmer_id)
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             result = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
@@ -285,6 +293,8 @@ class CreditEngine:
         """Get the most recent score for a farmer."""
         try:
             pk = self._ensure_pk_prefix(farmer_id)
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             result = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
@@ -318,6 +328,8 @@ class CreditEngine:
                 'score_change': Decimal(str(score.score_change)),
                 'calculation_date': score.calculation_date.isoformat()
             }
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             self.table.put_item(Item=score_data)
         except Exception as e:
             print(f"Error storing score: {str(e)}")
@@ -423,8 +435,8 @@ class CreditEngine:
         if not transactions:
             return 0.0
         
-        # Assume all transactions are fulfilled unless marked otherwise
-        fulfilled = sum(1 for t in transactions if t.get('status', 'fulfilled') == 'fulfilled')
+        # Assume all transactions are completed unless marked otherwise
+        fulfilled = sum(1 for t in transactions if t.get('status', 'completed') == 'completed')
         fulfillment_rate = fulfilled / len(transactions)
         
         return 6.0 * fulfillment_rate
@@ -512,14 +524,18 @@ class CreditEngine:
         if not transactions:
             return 0.0
         
-        # Assume all transactions are successful unless marked otherwise
-        successful = sum(1 for t in transactions if t.get('status', 'success') == 'success')
+        # Assume all transactions are completed unless marked otherwise
+        successful = sum(1 for t in transactions if t.get('status', 'completed') == 'completed')
         success_rate = successful / len(transactions)
         
         return 6.0 * success_rate
     
     def _calculate_payment_score(self, transactions: List[Dict]) -> float:
-        """Calculate payment timeliness score (0-10.5 points)."""
+        """Calculate payment timeliness score (0-15.0 points).
+
+        Normalized so that the weighted sum in calculate_financial_behavior()
+        (0.7 * payment_score + 0.3 * dues_score) can reach the full 15.0.
+        """
         if not transactions:
             return 0.0
         
@@ -527,13 +543,53 @@ class CreditEngine:
         timely = sum(1 for t in transactions if t.get('payment_status', 'timely') == 'timely')
         timely_rate = timely / len(transactions)
         
-        return 10.5 * timely_rate
+        return 15.0 * timely_rate
     
     def _calculate_dues_score(self, farmer_id: str) -> float:
-        """Calculate outstanding dues score (0-4.5 points)."""
-        # TODO: Query for outstanding dues
-        # For now, assume no outstanding dues
-        return 4.5
+        """Calculate outstanding dues score (0-15.0 points).
+
+        Queries DynamoDB for the farmer's transaction records and calculates
+        a score based on the ratio of paid vs outstanding dues.
+        Higher ratio of paid dues = higher score.
+
+        Normalized so that the weighted sum in calculate_financial_behavior()
+        (0.7 * payment_score + 0.3 * dues_score) can reach the full 15.0.
+
+        Returns:
+            Score from 0.0 (all outstanding) to 15.0 (all paid / no records).
+        """
+        try:
+            pk = self._ensure_pk_prefix(farmer_id)
+            result = self.table.query(
+                KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+                ExpressionAttributeValues={
+                    ':pk': pk,
+                    ':sk': 'TXN#'
+                }
+            )
+            records = result.get('Items', [])
+        except Exception as e:
+            print(f"Error fetching dues records for {farmer_id}: {str(e)}")
+            # Return neutral/default score on error
+            return 7.5
+
+        if not records:
+            # No records found — return neutral default score
+            return 7.5
+
+        total = len(records)
+        paid = sum(
+            1 for r in records
+            if r.get('payment_status', 'unknown') in ('paid', 'timely')
+        )
+        outstanding = total - paid
+
+        if outstanding == 0:
+            # All dues paid — max score
+            return 15.0
+
+        paid_ratio = paid / total
+        return 15.0 * paid_ratio
     
     def _calculate_digitization_score(self, transactions: List[Dict]) -> float:
         """Calculate digitization frequency score (0-5 points)."""
@@ -564,6 +620,18 @@ class CreditEngine:
         return 5.0 * completeness_rate
 
 
+# Module-level CreditEngine instance for warm invocation reuse
+_credit_engine = None
+
+
+def get_credit_engine():
+    """Lazy-init helper: returns the module-level CreditEngine, creating it on first call."""
+    global _credit_engine
+    if _credit_engine is None:
+        _credit_engine = CreditEngine(table)
+    return _credit_engine
+
+
 def handler(event, context):
     """Calculate reliability score for a farmer"""
     
@@ -580,8 +648,8 @@ def handler(event, context):
         if not farmer_id:
             return response(400, {'error': 'farmer_id required'})
         
-        # Initialize Credit Engine
-        credit_engine = CreditEngine(table)
+        # Reuse module-level CreditEngine for warm invocation benefits
+        credit_engine = get_credit_engine()
         
         # Calculate reliability score
         reliability_score = credit_engine.calculate_reliability_score(farmer_id)

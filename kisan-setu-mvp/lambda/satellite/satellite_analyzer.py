@@ -4,12 +4,19 @@ Retrieves satellite imagery and calculates NDVI for crop yield prediction.
 
 This component implements the SatelliteAnalyzer class as specified in the design document,
 with support for Sentinel-2 satellite imagery via SageMaker Geospatial.
+
+AUDIT TRAIL GAP: This handler performs direct boto3 DynamoDB writes (satellite
+imagery cache, NDVI results, yield predictions) that bypass the centralised
+DynamoDBAccess class and its audit trails. To close this gap, either migrate
+write paths to DynamoDBAccess or enable DynamoDB Streams on the KisanSetuData
+table to capture all mutations for audit/compliance purposes.
 """
 
 import json
 import boto3
 import os
 import sys
+import math
 from datetime import datetime, date, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal
@@ -29,8 +36,13 @@ from common.cost_optimization import (
     get_cached_or_compute
 )
 
-# AWS clients
-sagemaker_geospatial = boto3.client('sagemaker-geospatial')
+# AWS clients — SageMaker Geospatial is only available in us-west-2
+SAGEMAKER_REGION = os.environ.get('SAGEMAKER_REGION', 'us-west-2')
+SENTINEL2_ARN = os.environ.get(
+    'SENTINEL2_ARN',
+    'arn:aws:sagemaker-geospatial:us-west-2:378778860802:raster-data-collection/public/nmqj48dcu3g7ayw8'
+)
+sagemaker_geospatial = boto3.client('sagemaker-geospatial', region_name=SAGEMAKER_REGION)
 dynamodb = boto3.resource('dynamodb')
 s3 = boto3.client('s3')
 
@@ -267,16 +279,13 @@ class SatelliteAnalyzer:
             raise ValueError("Missing required bands for NDVI calculation (B4, B8)")
         
         try:
-            # In production, this would load the actual band data from S3
-            # and perform pixel-wise NDVI calculation
-            # For MVP, we'll simulate the calculation
-            
             b4_url = satellite_image.bands['B4']
             b8_url = satellite_image.bands['B8']
-            
-            # Simulate NDVI calculation
-            # In production: load raster data, calculate (B8 - B4) / (B8 + B4)
-            ndvi_value = self._simulate_ndvi_calculation(b4_url, b8_url)
+
+            # Compute real NDVI from Sentinel-2 COG files
+            ndvi_value = self._compute_ndvi_from_cog(
+                b4_url, b8_url, satellite_image.gps_coords
+            )
             
             # Ensure NDVI is in valid range [-1.0, 1.0]
             ndvi_value = max(-1.0, min(1.0, ndvi_value))
@@ -380,75 +389,339 @@ class SatelliteAnalyzer:
         latitude: float,
         longitude: float,
         buffer_km: float = 0.5
-    ) -> Dict[str, float]:
-        """Create bounding box around point with buffer in kilometers."""
-        # Approximate: 1 degree latitude ≈ 111 km
-        # 1 degree longitude ≈ 111 km * cos(latitude)
-        import math
-        
+    ) -> List[List[List[float]]]:
+        """Create GeoJSON polygon coordinates around point for SageMaker Geospatial API."""
         lat_buffer = buffer_km / 111.0
         lon_buffer = buffer_km / (111.0 * math.cos(math.radians(latitude)))
-        
-        return {
-            'min_lat': latitude - lat_buffer,
-            'max_lat': latitude + lat_buffer,
-            'min_lon': longitude - lon_buffer,
-            'max_lon': longitude + lon_buffer
-        }
+
+        min_lon = longitude - lon_buffer
+        max_lon = longitude + lon_buffer
+        min_lat = latitude - lat_buffer
+        max_lat = latitude + lat_buffer
+
+        # GeoJSON polygon: closed ring of [lon, lat] pairs
+        return [
+            [
+                [min_lon, min_lat],
+                [max_lon, min_lat],
+                [max_lon, max_lat],
+                [min_lon, max_lat],
+                [min_lon, min_lat],  # close the ring
+            ]
+        ]
     
     def _retrieve_sentinel2_data(
         self,
-        bbox: Dict[str, float],
+        bbox: List,
         start_date: date,
         end_date: date,
         gps_coords: Tuple[float, float]
     ) -> SatelliteImage:
         """
-        Retrieve Sentinel-2 data for bounding box and date range.
-        
-        This is a simplified implementation for MVP.
-        In production, use SageMaker Geospatial API.
+        Retrieve Sentinel-2 L2A data via SageMaker Geospatial API (us-west-2).
+
+        Searches for imagery with <30% cloud cover and returns the most recent scene.
+        Band URLs are public HTTPS COG files on sentinel-cogs.s3.us-west-2.amazonaws.com.
         """
-        # Generate image ID
-        image_id = f"S2_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-        
-        # Simulate band URLs (in production, these would be actual S3 URLs)
-        bands = {
-            'B4': f"s3://{S3_BUCKET_SATELLITE}/sentinel2/{image_id}/B4.tif",
-            'B8': f"s3://{S3_BUCKET_SATELLITE}/sentinel2/{image_id}/B8.tif",
-            'B3': f"s3://{S3_BUCKET_SATELLITE}/sentinel2/{image_id}/B3.tif",
-            'B2': f"s3://{S3_BUCKET_SATELLITE}/sentinel2/{image_id}/B2.tif"
+        query = {
+            'AreaOfInterest': {
+                'AreaOfInterestGeometry': {
+                    'PolygonGeometry': {'Coordinates': bbox}
+                }
+            },
+            'TimeRangeFilter': {
+                'StartTime': f"{start_date.isoformat()}T00:00:00Z",
+                'EndTime': f"{end_date.isoformat()}T23:59:59Z",
+            },
+            'PropertyFilters': {
+                'Properties': [
+                    {'Property': {'EoCloudCover': {'LowerBound': 0, 'UpperBound': 30}}}
+                ]
+            },
         }
-        
-        # Simulate cloud cover (random for MVP, in production from metadata)
-        import random
-        cloud_cover = random.uniform(0, 30)  # 0-30% cloud cover
-        
-        satellite_image = SatelliteImage(
+
+        response = self.sagemaker.search_raster_data_collection(
+            Arn=SENTINEL2_ARN,
+            RasterDataCollectionQuery=query,
+        )
+
+        items = response.get('Items', [])
+        if not items:
+            raise Exception(
+                f"No Sentinel-2 imagery found for ({gps_coords[0]:.4f}, {gps_coords[1]:.4f}) "
+                f"between {start_date} and {end_date} with <30% cloud cover"
+            )
+
+        # Use the first (most recent) result
+        best = items[0]
+        assets = best.get('Assets', {})
+        image_id = best.get('Id', f"S2_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
+        cloud_cover = best.get('Properties', {}).get('EoCloudCover', 0)
+
+        # Extract COG band URLs (HTTPS, publicly readable)
+        bands = {
+            'B4': assets.get('red', {}).get('Href', ''),
+            'B8': assets.get('nir', {}).get('Href', ''),
+            'B3': assets.get('green', {}).get('Href', ''),
+            'B2': assets.get('blue', {}).get('Href', ''),
+        }
+
+        # Parse timestamp
+        dt_val = best.get('DateTime')
+        if isinstance(dt_val, str):
+            timestamp = datetime.fromisoformat(dt_val.replace('Z', '+00:00'))
+        elif isinstance(dt_val, datetime):
+            timestamp = dt_val
+        else:
+            timestamp = datetime.utcnow()
+
+        return SatelliteImage(
             image_id=image_id,
             gps_coords=gps_coords,
             bands=bands,
-            timestamp=datetime.utcnow(),
+            timestamp=timestamp.replace(tzinfo=None),
             cloud_cover=cloud_cover,
-            data_source='Sentinel-2'
+            data_source='Sentinel-2',
         )
-        
-        return satellite_image
     
-    def _simulate_ndvi_calculation(self, b4_url: str, b8_url: str) -> float:
+    def _compute_ndvi_from_cog(
+        self,
+        b4_url: str,
+        b8_url: str,
+        gps_coords: Tuple[float, float],
+        window_size: int = 5,
+    ) -> float:
         """
-        Simulate NDVI calculation.
-        
-        In production, this would:
-        1. Load B4 (Red) and B8 (NIR) raster data from S3
-        2. Calculate (B8 - B4) / (B8 + B4) pixel-wise
-        3. Return mean NDVI value for the field
+        Compute real NDVI from Sentinel-2 COG band files via HTTP range requests.
+
+        Opens B4 (Red) and B8 (NIR) Cloud Optimized GeoTIFFs, reads a small
+        pixel window around the GPS point, and computes mean NDVI.
+
+        Args:
+            b4_url: HTTPS URL to B04 (Red) COG
+            b8_url: HTTPS URL to B08 (NIR) COG
+            gps_coords: (latitude, longitude) in EPSG:4326
+            window_size: pixel window side length (default 5 = 50m x 50m)
+
+        Returns:
+            Mean NDVI value for the window
         """
-        # For MVP, return a simulated NDVI value
-        # Typical healthy vegetation: 0.3 to 0.8
-        import random
-        return random.uniform(0.3, 0.8)
-    
+        import rasterio
+        from rasterio.transform import rowcol
+        from pyproj import Transformer
+        import numpy as np
+
+        lat, lon = gps_coords
+        half = window_size // 2
+
+        with rasterio.open(b4_url) as red_ds:
+            # Transform GPS (EPSG:4326) to the image CRS (typically EPSG:326XX UTM)
+            image_crs = str(red_ds.crs)
+            transformer = Transformer.from_crs("EPSG:4326", image_crs, always_xy=True)
+            x, y = transformer.transform(lon, lat)
+
+            row, col_idx = rowcol(red_ds.transform, x, y)
+
+            # Clamp to image bounds
+            row = max(half, min(red_ds.height - half - 1, row))
+            col_idx = max(half, min(red_ds.width - half - 1, col_idx))
+
+            window = rasterio.windows.Window(col_idx - half, row - half, window_size, window_size)
+            red_data = red_ds.read(1, window=window).astype(float)
+
+        with rasterio.open(b8_url) as nir_ds:
+            window = rasterio.windows.Window(col_idx - half, row - half, window_size, window_size)
+            nir_data = nir_ds.read(1, window=window).astype(float)
+
+        # NDVI = (NIR - Red) / (NIR + Red)
+        denominator = nir_data + red_data
+        ndvi = np.where(denominator > 0, (nir_data - red_data) / denominator, 0)
+        mean_ndvi = float(np.mean(ndvi))
+
+        print(f"Real NDVI computed: {mean_ndvi:.4f} (CRS: {image_crs}, pixel: {row},{col_idx})")
+        return mean_ndvi
+
+    def _compute_ndvi_array(
+        self,
+        b4_url: str,
+        b8_url: str,
+        gps_coords: Tuple[float, float],
+        window_size: int = 100,
+    ) -> 'Any':
+        """
+        Compute 2D NDVI array from Sentinel-2 COG band files.
+
+        Unlike _compute_ndvi_from_cog which returns a scalar mean, this returns
+        the full 2D array for heatmap rendering.
+
+        Args:
+            b4_url: HTTPS URL to B04 (Red) COG
+            b8_url: HTTPS URL to B08 (NIR) COG
+            gps_coords: (latitude, longitude) in EPSG:4326
+            window_size: pixel window side length (default 100 = ~1km × 1km)
+
+        Returns:
+            2D numpy array of NDVI values in [-1.0, 1.0]
+        """
+        import rasterio
+        from rasterio.transform import rowcol
+        from pyproj import Transformer
+        import numpy as np
+
+        lat, lon = gps_coords
+        half = window_size // 2
+
+        with rasterio.open(b4_url) as red_ds:
+            image_crs = str(red_ds.crs)
+            transformer = Transformer.from_crs("EPSG:4326", image_crs, always_xy=True)
+            x, y = transformer.transform(lon, lat)
+            row, col_idx = rowcol(red_ds.transform, x, y)
+
+            row = max(half, min(red_ds.height - half - 1, row))
+            col_idx = max(half, min(red_ds.width - half - 1, col_idx))
+
+            window = rasterio.windows.Window(col_idx - half, row - half, window_size, window_size)
+            red_data = red_ds.read(1, window=window).astype(float)
+
+        with rasterio.open(b8_url) as nir_ds:
+            window = rasterio.windows.Window(col_idx - half, row - half, window_size, window_size)
+            nir_data = nir_ds.read(1, window=window).astype(float)
+
+        denominator = nir_data + red_data
+        ndvi = np.where(denominator > 0, (nir_data - red_data) / denominator, 0.0)
+
+        print(f"NDVI array computed: shape={ndvi.shape}, mean={float(np.mean(ndvi)):.4f}")
+        return ndvi
+
+    def _render_ndvi_heatmap(
+        self,
+        ndvi_array: 'Any',
+        crop_type: str = '',
+        gps_coords: Optional[Tuple[float, float]] = None,
+    ) -> bytes:
+        """
+        Render NDVI 2D array as a color-mapped PNG image with legend.
+
+        Color scheme (farmer-friendly):
+          brown (bare/stressed) → orange → yellow → green → dark green (dense)
+
+        Returns:
+            PNG image bytes
+        """
+        import numpy as np
+        from PIL import Image, ImageDraw
+        import io
+
+        # NDVI color stops: (ndvi_threshold, RGB)
+        color_stops = [
+            (-1.0, (139, 90, 43)),
+            (0.0,  (165, 42, 42)),
+            (0.2,  (255, 140, 0)),
+            (0.4,  (255, 255, 0)),
+            (0.5,  (173, 255, 47)),
+            (0.6,  (50, 205, 50)),
+            (0.8,  (0, 128, 0)),
+            (1.0,  (0, 64, 0)),
+        ]
+
+        def ndvi_to_rgb(val):
+            val = max(-1.0, min(1.0, val))
+            for i in range(len(color_stops) - 1):
+                v0, c0 = color_stops[i]
+                v1, c1 = color_stops[i + 1]
+                if v0 <= val <= v1:
+                    t = (val - v0) / (v1 - v0) if v1 != v0 else 0
+                    return tuple(int(c0[j] + t * (c1[j] - c0[j])) for j in range(3))
+            return color_stops[-1][1]
+
+        # Sanitize: replace NaN/Inf with 0, then clamp to [-1, 1]
+        ndvi_array = np.nan_to_num(ndvi_array, nan=0.0, posinf=1.0, neginf=-1.0)
+        ndvi_array = np.clip(ndvi_array, -1.0, 1.0)
+
+        h, w = ndvi_array.shape
+
+        # Vectorized color mapping for performance
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                rgb[y, x] = ndvi_to_rgb(ndvi_array[y, x])
+
+        # Scale up 4× for WhatsApp readability
+        scale = 4
+        img = Image.fromarray(rgb).resize((w * scale, h * scale), Image.NEAREST)
+
+        # Build canvas with title + heatmap + legend
+        title_height = 40
+        legend_height = 70
+        total_width = w * scale
+        total_height = title_height + h * scale + legend_height
+
+        canvas = Image.new('RGB', (total_width, total_height), (255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        # Title
+        title = "NDVI Crop Health Map"
+        if crop_type:
+            title += f" - {crop_type}"
+        draw.text((10, 12), title, fill=(0, 0, 0))
+
+        # Paste heatmap
+        canvas.paste(img, (0, title_height))
+
+        # Color legend bar at bottom
+        legend_y = title_height + h * scale + 8
+        bar_height = 20
+        for x_pos in range(total_width):
+            ndvi_val = -0.2 + (x_pos / total_width) * 1.2
+            color = ndvi_to_rgb(ndvi_val)
+            draw.line([(x_pos, legend_y), (x_pos, legend_y + bar_height)], fill=color)
+
+        # Legend labels
+        labels = [("Stressed", 0.08), ("Sparse", 0.28), ("Moderate", 0.48),
+                  ("Healthy", 0.68), ("Dense", 0.88)]
+        for label, frac in labels:
+            x_pos = int(frac * total_width)
+            draw.text((x_pos - 20, legend_y + bar_height + 4), label, fill=(0, 0, 0))
+
+        # Mean NDVI annotation
+        mean_ndvi = float(np.mean(ndvi_array))
+        draw.text((10, legend_y + bar_height + 20), f"Avg NDVI: {mean_ndvi:.2f}", fill=(0, 0, 0))
+
+        if gps_coords:
+            coord_text = f"Location: {gps_coords[0]:.4f}N, {gps_coords[1]:.4f}E"
+            draw.text((total_width - 200, legend_y + bar_height + 20), coord_text, fill=(100, 100, 100))
+
+        buf = io.BytesIO()
+        canvas.save(buf, format='PNG', optimize=True)
+        buf.seek(0)
+        return buf.getvalue()
+
+    def _upload_heatmap_to_s3(self, image_bytes: bytes, field_id: str) -> str:
+        """Upload NDVI heatmap PNG to S3 processed bucket. Returns S3 key."""
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        s3_key = f"ndvi-heatmaps/{field_id}/{timestamp}.png"
+
+        bucket = os.environ.get('S3_BUCKET_PROCESSED', 'kisan-setu-processed')
+
+        self.s3.put_object(
+            Bucket=bucket,
+            Key=s3_key,
+            Body=image_bytes,
+            ContentType='image/png',
+        )
+        print(f"Uploaded NDVI heatmap: s3://{bucket}/{s3_key}")
+        return s3_key
+
+    def _generate_presigned_url(self, s3_key: str, expires_in: int = 3600) -> str:
+        """Generate a presigned HTTPS URL for the heatmap image."""
+        bucket = os.environ.get('S3_BUCKET_PROCESSED', 'kisan-setu-processed')
+        url = self.s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket, 'Key': s3_key},
+            ExpiresIn=expires_in,
+        )
+        return url
+
     def _calculate_confidence(self, cloud_cover: float) -> float:
         """Calculate confidence score based on cloud cover."""
         # Confidence decreases with cloud cover
@@ -511,7 +784,19 @@ class SatelliteAnalyzer:
             'rice': 5.0,
             'cotton': 2.5,
             'tomato': 30.0,
-            'potato': 20.0
+            'potato': 20.0,
+            'sugarcane': 70.0,
+            'soybean': 2.5,
+            'grape': 20.0,
+            'jowar': 2.0,
+            'bajra': 1.5,
+            'tur': 1.2,
+            'groundnut': 2.0,
+            'mustard': 1.5,
+            'maize': 5.0,
+            'chana': 1.5,
+            'chilli': 15.0,
+            'turmeric': 8.0,
         }
         
         base_yield = crop_factors.get(crop_type.lower(), 10.0)
@@ -539,6 +824,8 @@ class SatelliteAnalyzer:
         """Check cache for recent satellite imagery."""
         try:
             # Query DynamoDB for cached imagery
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             response = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
@@ -598,6 +885,8 @@ class SatelliteAnalyzer:
                 'cached_at': datetime.utcnow().isoformat()
             }
             
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             self.table.put_item(Item=item)
             print(f"Cached satellite imagery: {satellite_image.image_id}")
             
@@ -623,6 +912,8 @@ class SatelliteAnalyzer:
                 'created_at': datetime.utcnow().isoformat()
             }
             
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             self.table.put_item(Item=item)
             print(f"Stored NDVI result: {ndvi_result.field_id}")
             
@@ -652,6 +943,8 @@ class SatelliteAnalyzer:
                 'created_at': datetime.utcnow().isoformat()
             }
             
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             self.table.put_item(Item=item)
             print(f"Stored yield prediction: {yield_prediction.field_id}")
             
@@ -661,18 +954,31 @@ class SatelliteAnalyzer:
 
 # ==================== Lambda Handler ====================
 
+# Module-level SatelliteAnalyzer instance for warm invocation reuse
+_analyzer = None
+
+
+def get_analyzer():
+    """Lazy-init helper: returns the module-level SatelliteAnalyzer, creating it on first call."""
+    global _analyzer
+    if _analyzer is None:
+        _analyzer = SatelliteAnalyzer()
+    return _analyzer
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Lambda handler for satellite analysis.
-    
+
     Input:
-        - action: 'get_imagery', 'calculate_ndvi', 'predict_yield'
+        - action: 'get_imagery', 'calculate_ndvi', 'predict_yield', 'generate_heatmap'
         - gps_coords: [latitude, longitude]
         - date_range: [start_date, end_date] (for get_imagery)
-        - crop_type: Crop type (for predict_yield)
-    
+        - crop_type: Crop type (for predict_yield / generate_heatmap)
+        - include_heatmap: bool (optional, for predict_yield)
+
     Output:
-        - Satellite imagery, NDVI result, or yield prediction
+        - Satellite imagery, NDVI result, yield prediction, or heatmap URL
     """
     
     try:
@@ -689,8 +995,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         gps_coords = tuple(gps_coords)
         
-        # Initialize SatelliteAnalyzer
-        analyzer = SatelliteAnalyzer()
+        # Reuse module-level SatelliteAnalyzer for warm invocation benefits
+        analyzer = get_analyzer()
         
         if action == 'get_imagery':
             # Get satellite imagery
@@ -741,27 +1047,58 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         elif action == 'predict_yield':
             # Get NDVI history and predict yield
             crop_type = event.get('crop_type', 'onion')
-            
+            include_heatmap = event.get('include_heatmap', False)
+
             # Retrieve NDVI history from DynamoDB
             field_id = analyzer._generate_field_id(gps_coords)
             ndvi_history = analyzer._get_ndvi_history(field_id)
-            
+
             # If no history, calculate current NDVI first
+            satellite_image = None
             if not ndvi_history:
                 end_date = date.today()
                 start_date = end_date - timedelta(days=7)
                 satellite_image = analyzer.get_satellite_imagery(gps_coords, (start_date, end_date))
                 ndvi_result = analyzer.calculate_ndvi(satellite_image)
                 ndvi_history = [ndvi_result]
-            
+
             yield_prediction = analyzer.predict_yield(ndvi_history, crop_type)
-            
+
+            # Include NDVI value from most recent reading
+            latest_ndvi_val = float(ndvi_history[-1].ndvi_value) if ndvi_history else None
+
+            # Generate NDVI heatmap if requested
+            heatmap_url = None
+            if include_heatmap:
+                try:
+                    # Retrieve imagery if not already fetched above
+                    if satellite_image is None:
+                        end_date = date.today()
+                        start_date = end_date - timedelta(days=7)
+                        satellite_image = analyzer.get_satellite_imagery(gps_coords, (start_date, end_date))
+
+                    ndvi_array = analyzer._compute_ndvi_array(
+                        satellite_image.bands['B4'],
+                        satellite_image.bands['B8'],
+                        gps_coords,
+                        window_size=100,
+                    )
+                    image_bytes = analyzer._render_ndvi_heatmap(
+                        ndvi_array, crop_type=crop_type, gps_coords=gps_coords
+                    )
+                    s3_key = analyzer._upload_heatmap_to_s3(image_bytes, field_id)
+                    heatmap_url = analyzer._generate_presigned_url(s3_key)
+                    print(f"Heatmap generated: {heatmap_url[:80]}...")
+                except Exception as hm_err:
+                    print(f"Heatmap generation failed (non-fatal): {hm_err}")
+
             return {
                 'statusCode': 200,
                 'body': json.dumps({
                     'status': 'success',
                     'action': 'predict_yield',
                     'field_id': yield_prediction.field_id,
+                    'ndvi_value': latest_ndvi_val,
                     'estimated_volume': float(yield_prediction.estimated_volume),
                     'confidence_interval': [
                         float(yield_prediction.confidence_interval[0]),
@@ -769,10 +1106,50 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     ],
                     'maturity_stage': yield_prediction.maturity_stage,
                     'crop_type': crop_type,
-                    'prediction_date': yield_prediction.prediction_date.isoformat()
+                    'prediction_date': yield_prediction.prediction_date.isoformat(),
+                    'data_source': 'sentinel-2',
+                    'heatmap_url': heatmap_url,
                 })
             }
-        
+
+        elif action == 'generate_heatmap':
+            # Standalone heatmap generation (for dashboard/API use)
+            crop_type = event.get('crop_type', 'onion')
+            window_size = event.get('window_size', 100)
+
+            end_date = date.today()
+            start_date = end_date - timedelta(days=7)
+            satellite_image = analyzer.get_satellite_imagery(gps_coords, (start_date, end_date))
+
+            ndvi_array = analyzer._compute_ndvi_array(
+                satellite_image.bands['B4'],
+                satellite_image.bands['B8'],
+                gps_coords,
+                window_size=window_size,
+            )
+            import numpy as np
+            mean_ndvi = float(np.mean(ndvi_array))
+
+            image_bytes = analyzer._render_ndvi_heatmap(
+                ndvi_array, crop_type=crop_type, gps_coords=gps_coords
+            )
+            field_id = analyzer._generate_field_id(gps_coords)
+            s3_key = analyzer._upload_heatmap_to_s3(image_bytes, field_id)
+            presigned_url = analyzer._generate_presigned_url(s3_key)
+
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'status': 'success',
+                    'action': 'generate_heatmap',
+                    'heatmap_url': presigned_url,
+                    'mean_ndvi': mean_ndvi,
+                    'window_size': window_size,
+                    'field_id': field_id,
+                    'data_source': 'sentinel-2',
+                })
+            }
+
         else:
             raise ValueError(f"Unknown action: {action}")
     
@@ -786,6 +1163,18 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             mock_data = mock.get_ndvi_data(gps_coords[0], gps_coords[1])
 
             if mock_data:
+                # Generate mock heatmap if requested
+                mock_heatmap_url = None
+                include_heatmap = event.get('include_heatmap', False) if isinstance(event, dict) else False
+                if include_heatmap or action == 'generate_heatmap':
+                    try:
+                        mock_heatmap_url = mock.generate_mock_heatmap_url(
+                            gps_coords[0], gps_coords[1],
+                            crop_type=mock_data.get('crop_type', 'Onion'),
+                        )
+                    except Exception as hm_err:
+                        print(f"Mock heatmap generation failed: {hm_err}")
+
                 return {
                     'statusCode': 200,
                     'body': json.dumps({
@@ -798,7 +1187,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                         'estimated_yield': mock_data['estimated_yield'],
                         'coordinates': mock_data['coordinates'],
                         'data_source': 'mock_fallback',
-                        'generated_at': mock_data['generated_at']
+                        'generated_at': mock_data['generated_at'],
+                        'heatmap_url': mock_heatmap_url,
                     })
                 }
         except Exception as mock_err:
@@ -819,6 +1209,8 @@ def _get_ndvi_history(self, field_id: str, days: int = 30) -> List[NDVIResult]:
     try:
         cutoff_date = datetime.utcnow() - timedelta(days=days)
         
+        # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
         response = self.table.query(
             KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
             ExpressionAttributeValues={

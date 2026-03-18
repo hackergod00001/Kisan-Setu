@@ -522,6 +522,7 @@ aws lambda invoke \
 When something doesn't work, try these in order:
 
 - [ ] Check CloudWatch logs for errors
+- [ ] Check CloudWatch alarms for triggered alerts
 - [ ] Verify AWS credentials are configured
 - [ ] Verify webhook URL matches deployment
 - [ ] Verify WhatsApp credentials in Secrets Manager
@@ -534,4 +535,103 @@ When something doesn't work, try these in order:
 
 ---
 
-**Last Updated**: March 2026
+## ☁️ Phase 6: Production Readiness Troubleshooting
+
+### 21. CloudWatch Alarms Not Triggering
+
+**Symptom**: Errors occur but no SNS notifications received
+
+**Diagnosis**:
+```bash
+# List all alarms and their states
+aws cloudwatch describe-alarms \
+  --alarm-name-prefix "kisan-setu" \
+  --query "MetricAlarms[].{Name:AlarmName,State:StateValue}" \
+  --output table \
+  --region ap-south-1
+```
+
+**Common Causes**:
+- No email subscription on SNS topic → Deploy with: `cdk deploy -c alert_email=your@email.com`
+- Email subscription pending confirmation → Check inbox for AWS SNS confirmation email
+- Alarm threshold not met → Alarms trigger on > 0 errors in 5-minute window
+
+**Solution**:
+```bash
+# Add email subscription manually
+aws sns subscribe \
+  --topic-arn arn:aws:sns:ap-south-1:ACCOUNT_ID:kisan-setu-critical-alerts \
+  --protocol email \
+  --notification-endpoint your@email.com \
+  --region ap-south-1
+# Then confirm subscription via the email link
+```
+
+---
+
+### 22. Provisioned Concurrency Issues
+
+**Symptom**: Cold starts still occurring on Router or Orchestrator
+
+**Diagnosis**:
+```bash
+# Check provisioned concurrency status
+aws lambda get-provisioned-concurrency-config \
+  --function-name KisanSetuMVPStack-MessageRouter \
+  --qualifier live \
+  --region ap-south-1
+
+# Check alias exists
+aws lambda get-alias \
+  --function-name KisanSetuMVPStack-MessageRouter \
+  --name live \
+  --region ap-south-1
+```
+
+**Common Causes**:
+- Provisioned concurrency still initializing (takes 1-2 minutes after deploy)
+- Account concurrency limit reached → Check Lambda service quotas
+- API Gateway pointing to `$LATEST` instead of alias → Redeploy
+
+**Solution**:
+```bash
+# If needed, redeploy to fix alias integration
+cdk deploy
+```
+
+---
+
+### 23. DynamoDB PITR Restore Process
+
+**Symptom**: Need to restore data from a point in time
+
+**Process**:
+```bash
+# 1. Check PITR is enabled
+aws dynamodb describe-continuous-backups \
+  --table-name KisanSetuData \
+  --region ap-south-1
+
+# 2. Restore to a new table
+aws dynamodb restore-table-to-point-in-time \
+  --source-table-name KisanSetuData \
+  --target-table-name KisanSetuData-Restored \
+  --restore-date-time 2026-03-15T12:00:00Z \
+  --region ap-south-1
+
+# 3. Verify restored data
+aws dynamodb scan \
+  --table-name KisanSetuData-Restored \
+  --max-items 5 \
+  --region ap-south-1
+```
+
+**Notes**:
+- PITR restores to a NEW table (cannot overwrite the original)
+- Restore window: last 35 days
+- GSIs are recreated automatically
+- Tags and auto-scaling settings are NOT copied
+
+---
+
+**Last Updated**: March 15, 2026

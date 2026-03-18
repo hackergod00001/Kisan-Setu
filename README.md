@@ -37,17 +37,19 @@ graph TB
         ROUTER["MessageRouter<br/>512 MB · 30s"]
         DOC["📄 DocumentProcessor<br/>1024 MB · 60s"]
         VOICE["🎤 VoiceHandler<br/>512 MB · 60s"]
-        ORCH["🤖 BedrockOrchestrator<br/>1024 MB · 60s"]
+        ORCH["🤖 BedrockOrchestrator<br/>1024 MB · 180s"]
         CREDIT["💳 CreditCalculator<br/>512 MB · 30s"]
-        SAT["🛰️ SatelliteAnalyzer<br/>1024 MB · 60s"]
+        SAT["🛰️ SatelliteAnalyzer<br/>2048 MB · 120s"]
         KB["📚 KnowledgeBase<br/>512 MB · 60s"]
         SYNC["🔄 SyncHandler<br/>512 MB · 60s"]
     end
 
     subgraph AI["🤖 AI Services"]
         BEDROCK["Bedrock Converse API<br/>5-model APAC fallback"]
+        BKBASE["Bedrock Knowledge Bases<br/>(RAG)"]
         TEXTRACT["Textract Queries"]
-        TRANSCRIBE["Transcribe + Polly"]
+        TRANSCRIBE["Amazon Transcribe"]
+        POLLY["Amazon Polly"]
         SAGEMAKER["SageMaker Geospatial"]
     end
 
@@ -60,15 +62,18 @@ graph TB
     WA --> APIGW --> ROUTER
     DASH --> S3
     APPSYNC --> SYNC
-    ROUTER --> DOC & VOICE & ORCH
+    ROUTER -->|"image"| DOC
+    ROUTER -->|"audio"| VOICE
+    ROUTER -->|"text"| ORCH
+    VOICE -->|"transcribed text"| ORCH
     ORCH --> CREDIT & SAT & KB
     DOC --> BEDROCK & TEXTRACT
-    VOICE --> TRANSCRIBE
+    VOICE --> TRANSCRIBE & POLLY
     ORCH --> BEDROCK
-    KB --> BEDROCK
+    KB --> BKBASE
     SAT --> SAGEMAKER
-    DOC & ORCH & CREDIT & SAT & SYNC --> DDB
-    DOC & VOICE --> S3
+    ROUTER & DOC & ORCH & CREDIT & SAT & SYNC --> DDB
+    DOC & VOICE & SAT --> S3
 ```
 
 ---
@@ -217,12 +222,22 @@ CI/CD pipeline (GitHub Actions) runs 5 parallel jobs: unit tests, property-based
 
 ## 🔐 Security
 
+- API Gateway: API key authentication on `/process`, `/credit`, `/knowledge` endpoints
+- AppSync: Cognito User Pool authorization
+- S3 Dashboard: Private bucket with CloudFront OAI (no public access)
+- Field-level encryption (KMS) for sensitive DynamoDB data via `DynamoDBAccess`
 - WhatsApp credentials in AWS Secrets Manager
-- Field-level encryption (KMS + Fernet) for sensitive data
-- IAM roles with service-specific policies
+- Input sanitization: max length (2000 chars), prompt injection detection, special char filtering
+- Per-sender rate limiting: DynamoDB atomic counters (10 msg/min) with TTL cleanup
+- Per-function IAM roles with least-privilege policies (scoped to specific table/bucket ARNs)
 - API Gateway throttling (100 req/s, burst 200)
 - Webhook verification token validation
-- Automatic audit trail on all data mutations
+- Module-level lazy init for all Lambda handlers (warm invocation reuse)
+- Conversation TTL: 30-day auto-expiry
+- SNS critical error alerts on all Lambdas
+- 18 CloudWatch alarms (Lambda errors/throttles + API Gateway 5xx/latency)
+- DynamoDB Point-in-Time Recovery (35-day restore window)
+- Provisioned concurrency on Router + Orchestrator (PC=2)
 
 ---
 
@@ -230,7 +245,6 @@ CI/CD pipeline (GitHub Actions) runs 5 parallel jobs: unit tests, property-based
 
 - [`architecture.md`](architecture.md) — Full architecture reference (Mermaid diagrams)
 - [`kisan-setu-mvp/README.md`](kisan-setu-mvp/README.md) — Detailed project README
-- [`IMPLEMENTATION_STATUS_AND_TASKS.md`](IMPLEMENTATION_STATUS_AND_TASKS.md) — Task flow & status
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — Common issues & solutions
 - [`FAQ.md`](FAQ.md) — Frequently asked questions
 - [`kisan-setu-mvp/DEPLOYMENT_SCRIPTS.md`](kisan-setu-mvp/DEPLOYMENT_SCRIPTS.md) — Deployment script reference
@@ -265,8 +279,3 @@ Built with:
 
 MIT — AI for Bharat Hackathon 2026
 
----
-
-**Status**: ✅ Production Ready | Meta WhatsApp Integration Active
-
-**Last Updated**: March 9, 2026

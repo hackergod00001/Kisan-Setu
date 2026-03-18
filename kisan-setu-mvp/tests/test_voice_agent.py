@@ -156,7 +156,7 @@ class TestTranscribeAudio:
         # Verify start_transcription_job was called with language identification
         call_args = voice_agent.transcribe.start_transcription_job.call_args[1]
         assert call_args['IdentifyLanguage'] is True
-        assert call_args['LanguageOptions'] == voice_agent.SUPPORTED_LANGUAGES
+        assert call_args['LanguageOptions'] == voice_agent.TRANSCRIBE_LANGUAGE_OPTIONS
     
     @patch('voice_agent.VoiceAgent._wait_for_transcription')
     def test_transcribe_audio_low_confidence(self, mock_wait, voice_agent):

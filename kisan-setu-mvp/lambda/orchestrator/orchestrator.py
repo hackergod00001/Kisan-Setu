@@ -11,6 +11,12 @@ Current chain: Nova Pro → Nova Lite → Claude 3.7 Sonnet → Claude 3.5 Sonne
 (Claude APAC models require AWS Marketplace subscription to activate)
 
 Implements Requirements 7.1, 7.2, 7.3, 7.4, 7.5
+
+AUDIT TRAIL GAP: This handler performs direct boto3 DynamoDB writes (conversation
+messages, model cost tracking, voice-ledger transactions) that bypass the
+centralised DynamoDBAccess class and its audit trails. To close this gap,
+either migrate write paths to DynamoDBAccess or enable DynamoDB Streams on the
+KisanSetuData table to capture all mutations for audit/compliance purposes.
 """
 
 import os
@@ -18,6 +24,7 @@ import json
 import boto3
 import sys
 import re
+import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, date
 from dataclasses import dataclass, asdict
@@ -89,7 +96,7 @@ SIMPLE_PATTERNS = [
     r'^.{1,15}$',  # Very short messages (under 15 chars)
 ]
 
-# Complex queries → Opus 4.6 (deep reasoning)
+# Complex queries → Nova Pro (deep reasoning)
 COMPLEX_PATTERNS = [
     r'\b(credit\s*score|loan|rin|karj)\b',
     r'\b(analyze|analysis|vishleshan)\b',
@@ -276,6 +283,8 @@ class Response:
     timestamp: str
     model_used: str = ''
     tier_used: str = ''
+    image_url: Optional[str] = None
+    image_caption: Optional[str] = None
 
 
 class ModelRouter:
@@ -316,6 +325,8 @@ class ModelRouter:
     def get_daily_cost(self) -> float:
         """Get today's accumulated model cost from DynamoDB."""
         try:
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             resp = table.get_item(Key={'PK': 'SYSTEM#MODEL_COSTS', 'SK': self.daily_cost_key})
             item = resp.get('Item', {})
             return float(item.get('total_cost', 0.0))
@@ -330,6 +341,8 @@ class ModelRouter:
             cost = (input_tokens / 1000 * config['cost_per_1k_input'] +
                     output_tokens / 1000 * config['cost_per_1k_output'])
 
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             table.update_item(
                 Key={'PK': 'SYSTEM#MODEL_COSTS', 'SK': self.daily_cost_key},
                 UpdateExpression='SET total_cost = if_not_exists(total_cost, :zero) + :cost, '
@@ -361,7 +374,7 @@ class ModelRouter:
 
         if daily_cost >= DAILY_COST_THRESHOLD:
             print(f"Daily cost ${daily_cost:.4f} >= threshold ${DAILY_COST_THRESHOLD}. "
-                  f"Forcing secondary (Haiku 4.5)")
+                  f"Forcing secondary (Nova Lite)")
             return 'secondary', MODEL_TIERS['secondary']
 
         tier = self.classify_query(message)
@@ -376,9 +389,9 @@ class BedrockOrchestrator:
     Bedrock Orchestration with Tiered Model Routing.
 
     Tier strategy:
-    - Primary (Opus 4.6): Complex analytical queries
-    - Default (Sonnet 4): Standard farming queries
-    - Secondary (Haiku 4.5): Simple greetings/FAQs + cost threshold fallback
+    - Primary (Nova Pro): Complex analytical queries
+    - Default (Nova Pro): Standard farming queries
+    - Secondary (Nova Lite): Simple greetings/FAQs + cost threshold fallback
     """
 
     # Tool name to Lambda function mapping
@@ -398,8 +411,6 @@ class BedrockOrchestrator:
         self.router = ModelRouter()
         self.table = table
         self.llm_adapter = LLMAdapter(bedrock_runtime=bedrock_runtime)
-        self.agent_id = os.environ.get('BEDROCK_AGENT_ID', '')
-        self.agent_alias_id = os.environ.get('BEDROCK_AGENT_ALIAS_ID', '')
 
     def decompose_task(self, complex_request: str) -> List['SubTask']:
         """Break a complex request into ordered sub-tasks."""
@@ -490,6 +501,8 @@ class BedrockOrchestrator:
         farmer_id = message.sender_id
         try:
             # Fetch existing history
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             resp = self.table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
@@ -501,6 +514,17 @@ class BedrockOrchestrator:
             history = resp.get('Items', [])
 
             # Store the new message
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
+            #
+            # TTL NOTE: The 'ttl' attribute is set to 30 days from now (epoch seconds)
+            # for automatic cleanup of old conversation items. DynamoDB TTL must be
+            # enabled on the 'KisanSetuData' table for the 'ttl' attribute. Without
+            # enabling TTL on the table, these attributes are stored but items are
+            # never automatically deleted.
+            # Enable via AWS CLI:
+            #   aws dynamodb update-time-to-live --table-name KisanSetuData \
+            #     --time-to-live-specification "Enabled=true, AttributeName=ttl"
             ts = datetime.utcnow().isoformat()
             self.table.put_item(Item={
                 'PK': conversation_id,
@@ -511,6 +535,7 @@ class BedrockOrchestrator:
                 'language': message.language,
                 'message_type': message.message_type,
                 'timestamp': message.timestamp,
+                'ttl': int(time.time()) + (30 * 24 * 60 * 60),
             })
 
             return ConversationContext(
@@ -726,9 +751,38 @@ class BedrockOrchestrator:
             print(f"Error invoking CreditCalculator: {e}")
             return None
 
-    def _invoke_satellite_analyzer(self, sender_id: str) -> Optional[str]:
-        """Invoke the SatelliteAnalyzer Lambda and format the result."""
+    def _get_farmer_crop_type(self, sender_id: str) -> Optional[str]:
+        """Determine farmer's crop type from their most recent transaction."""
         try:
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
+            result = table.query(
+                KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
+                ExpressionAttributeValues={
+                    ':pk': f'FARMER#{sender_id}',
+                    ':sk': 'TXN#'
+                },
+                ScanIndexForward=False,
+                Limit=1
+            )
+            items = result.get('Items', [])
+            if items:
+                return items[0].get('crop_type')
+            return None
+        except Exception as e:
+            print(f"Error fetching crop type for {sender_id}: {e}")
+            return None
+
+    def _invoke_satellite_analyzer(self, sender_id: str) -> Optional[tuple]:
+        """
+        Invoke the SatelliteAnalyzer Lambda and format the result.
+
+        Returns:
+            Tuple of (formatted_text_report, heatmap_url) or None
+        """
+        try:
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             # Look up farmer's GPS coordinates from DynamoDB
             farmer_resp = table.get_item(
                 Key={'PK': f'FARMER#{sender_id}', 'SK': 'METADATA'}
@@ -742,12 +796,16 @@ class BedrockOrchestrator:
             if lat == 0 or lon == 0:
                 return None
 
-            print(f"Invoking SatelliteAnalyzer for ({lat}, {lon})")
+            # Smart crop type detection: ledger → default
+            crop_type = self._get_farmer_crop_type(sender_id) or 'onion'
+            print(f"Invoking SatelliteAnalyzer for ({lat}, {lon}), crop: {crop_type}")
+
             result = self.invoke_tool('satellite_analyzer', {
                 'action': 'predict_yield',
                 'gps_coords': [lat, lon],
-                'crop_type': 'onion',
-                'farmer_id': sender_id
+                'crop_type': crop_type,
+                'farmer_id': sender_id,
+                'include_heatmap': True,
             })
 
             if result.status == 'error':
@@ -795,8 +853,12 @@ class BedrockOrchestrator:
                 }
                 stage_desc = stage_desc_map.get(stage, '')
 
+                data_source = body.get('data_source', 'unknown')
+                source_label = 'Sentinel-2 Satellite' if data_source == 'sentinel-2' else 'Estimated'
+
                 report = (
                     f"SATELLITE CROP HEALTH REPORT\n"
+                    f"Data Source: {source_label}\n"
                     f"Crop: {crop}\n"
                     f"Health: {health}\n"
                     f"Growth Stage: {stage} — {stage_desc}\n"
@@ -807,7 +869,8 @@ class BedrockOrchestrator:
                 if ci_str:
                     report += f"Yield Range: {ci_str}\n"
 
-                return report
+                heatmap_url = body.get('heatmap_url')
+                return (report, heatmap_url)
 
             return None
         except Exception as e:
@@ -830,6 +893,10 @@ class BedrockOrchestrator:
         'tur': 'Tur', 'तूर': 'Tur', 'arhar': 'Tur',
         'chilli': 'Chilli', 'mirch': 'Chilli', 'मिर्च': 'Chilli',
         'turmeric': 'Turmeric', 'haldi': 'Turmeric', 'हल्दी': 'Turmeric',
+        'groundnut': 'Groundnut', 'moongfali': 'Groundnut', 'मूंगफली': 'Groundnut',
+        'mustard': 'Mustard', 'sarson': 'Mustard', 'सरसों': 'Mustard',
+        'maize': 'Maize', 'makka': 'Maize', 'मक्का': 'Maize',
+        'chana': 'Chana', 'चना': 'Chana',
     }
 
     def _parse_transaction_from_text(self, text: str) -> Optional[List[Dict[str, Any]]]:
@@ -991,6 +1058,8 @@ class BedrockOrchestrator:
                     'timestamp': timestamp,
                     'created_at': timestamp,
                 }
+                # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+                # Consider migrating to DynamoDBAccess for audit compliance.
                 self.table.put_item(Item=db_item)
                 saved_items.append((transaction_id, item, review_fields))
                 print(f"Stored voice ledger: {transaction_id} — {crop_type} {quantity}kg @₹{price}")
@@ -1051,6 +1120,7 @@ class BedrockOrchestrator:
             intent = self._detect_intent(user_message)
             tool_context = ""
             actions_taken = [f'model_invocation:{tier}']
+            heatmap_url = None  # Set by satellite intent if heatmap is generated
 
             if intent == 'transaction':
                 # Voice-to-ledger: parse transaction data and save to DynamoDB
@@ -1134,8 +1204,10 @@ class BedrockOrchestrator:
                     actions_taken.append('credit_calculator:error')
 
             elif intent == 'satellite':
-                satellite_data = self._invoke_satellite_analyzer(sender_id)
-                if satellite_data:
+                satellite_result = self._invoke_satellite_analyzer(sender_id)
+                heatmap_url = None
+                if satellite_result:
+                    satellite_data, heatmap_url = satellite_result
                     tool_context = (
                         f"\n\n[SYSTEM DATA - Satellite crop health results for this farmer's field:\n"
                         f"{satellite_data}\n"
@@ -1146,9 +1218,12 @@ class BedrockOrchestrator:
                         f"- Give 2-3 practical next-step tips based on the growth stage\n"
                         f"- Keep it under 200 words, use bullet points (•) for tips\n"
                         f"- Do NOT use technical jargon like 'NDVI' — say 'vegetation health index' or skip it\n"
+                        f"- If a satellite heatmap image is being sent alongside, mention that the farmer can see their field's health map in the image\n"
                         f"- End with an encouraging line]\n"
                     )
                     actions_taken.append('satellite_analyzer:success')
+                    if heatmap_url:
+                        actions_taken.append('heatmap:generated')
                 else:
                     tool_context = (
                         "\n\n[SYSTEM DATA: Could not retrieve satellite data for this farmer's location. "
@@ -1199,7 +1274,9 @@ class BedrockOrchestrator:
                 conversation_id=conversation_id,
                 timestamp=datetime.utcnow().isoformat(),
                 model_used=model_config['name'],
-                tier_used=tier
+                tier_used=tier,
+                image_url=heatmap_url,
+                image_caption='NDVI Crop Health Map' if heatmap_url else None,
             )
 
         except LLMAdapterError as e:
@@ -1241,65 +1318,7 @@ class BedrockOrchestrator:
                 tier_used='none'
             )
 
-    def _invoke_model(
-        self,
-        model_config: Dict,
-        user_message: str,
-        history: List[Dict],
-        language: str
-    ) -> Tuple[str, int, int]:
-        """Invoke a Bedrock model using Converse API (works with all models)."""
-        messages = []
 
-        # Add conversation history
-        for msg in history:
-            messages.append({
-                'role': msg['role'],
-                'content': [{'text': msg['content']}]
-            })
-
-        # Add current user message
-        messages.append({
-            'role': 'user',
-            'content': [{'text': user_message}]
-        })
-
-        print(f"Invoking {model_config['name']} ({model_config['model_id']})")
-
-        # Use Converse API (unified API for all Bedrock models)
-        resp = bedrock_runtime.converse(
-            modelId=model_config['model_id'],
-            messages=messages,
-            system=[{'text': SYSTEM_PROMPT}],
-            inferenceConfig={
-                'maxTokens': model_config['max_tokens'],
-                'temperature': 0.7
-            }
-        )
-
-        # Extract response from Converse API format
-        response_text = resp['output']['message']['content'][0]['text']
-        input_tokens = resp.get('usage', {}).get('inputTokens', 0)
-        output_tokens = resp.get('usage', {}).get('outputTokens', 0)
-
-        print(f"Response from {model_config['name']}: {input_tokens} in / {output_tokens} out")
-        return response_text, input_tokens, output_tokens
-
-    def _invoke_fallback(self, user_message: str, language: str) -> str:
-        """Fallback: try secondary model with minimal context."""
-        resp = bedrock_runtime.converse(
-            modelId=MODEL_TIERS['secondary']['model_id'],
-            messages=[{
-                'role': 'user',
-                'content': [{'text': user_message}]
-            }],
-            system=[{'text': SYSTEM_PROMPT}],
-            inferenceConfig={
-                'maxTokens': 512,
-                'temperature': 0.7
-            }
-        )
-        return resp['output']['message']['content'][0]['text']
 
     def _static_fallback(self, user_message: str, language: str) -> str:
         """Static fallback when all models fail."""
@@ -1314,6 +1333,8 @@ class BedrockOrchestrator:
     def _get_recent_history(self, sender_id: str, limit: int = 6) -> List[Dict]:
         """Get recent conversation history from DynamoDB."""
         try:
+            # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             resp = table.query(
                 KeyConditionExpression='PK = :pk AND begins_with(SK, :sk)',
                 ExpressionAttributeValues={
@@ -1336,9 +1357,17 @@ class BedrockOrchestrator:
 
     def _store_conversation(self, sender_id: str, conversation_id: str,
                             user_message: str, response_text: str):
-        """Store conversation exchange in DynamoDB."""
+        """Store conversation exchange in DynamoDB.
+
+        Each item includes a 'ttl' attribute set to 30 days from now (epoch
+        seconds) so that DynamoDB Time-To-Live can automatically delete stale
+        conversation items. TTL must be enabled on the 'KisanSetuData' table
+        for the 'ttl' attribute — see infrastructure_stack.py for details.
+        """
         try:
             ts = datetime.utcnow().isoformat()
+            # NOTE: Direct boto3 DynamoDB calls — bypass DynamoDBAccess audit trails.
+            # Consider migrating to DynamoDBAccess for audit compliance.
             # Store user message
             table.put_item(Item={
                 'PK': f"CONVERSATION#{sender_id}",
@@ -1346,7 +1375,8 @@ class BedrockOrchestrator:
                 'role': 'user',
                 'content': user_message,
                 'conversation_id': conversation_id,
-                'timestamp': ts
+                'timestamp': ts,
+                'ttl': int(time.time()) + (30 * 24 * 60 * 60),
             })
             # Store assistant response
             ts2 = datetime.utcnow().isoformat()
@@ -1356,10 +1386,35 @@ class BedrockOrchestrator:
                 'role': 'assistant',
                 'content': response_text,
                 'conversation_id': conversation_id,
-                'timestamp': ts2
+                'timestamp': ts2,
+                'ttl': int(time.time()) + (30 * 24 * 60 * 60),
             })
         except Exception as e:
             print(f"Error storing conversation: {e}")
+
+
+# Module-level orchestrator instance for warm invocation reuse
+_orchestrator = None
+
+
+def get_orchestrator():
+    """Lazy-init helper: returns the module-level BedrockOrchestrator, creating it on first call."""
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = BedrockOrchestrator()
+    return _orchestrator
+
+
+# Module-level WhatsApp interface for warm invocation reuse
+_whatsapp = None
+
+
+def get_whatsapp():
+    """Lazy-init helper: returns the module-level MetaWhatsAppInterface, creating it on first call."""
+    global _whatsapp
+    if _whatsapp is None:
+        _whatsapp = MetaWhatsAppInterface()
+    return _whatsapp
 
 
 def handler(event, context):
@@ -1375,8 +1430,8 @@ def handler(event, context):
         message_text = event.get('message_text', '')
         language = event.get('language', 'en')
 
-        # Create orchestrator and process
-        orchestrator = BedrockOrchestrator()
+        # Reuse module-level orchestrator for warm invocation benefits
+        orchestrator = get_orchestrator()
         response = orchestrator.process_request(
             user_message=message_text,
             sender_id=sender_id,
@@ -1384,7 +1439,7 @@ def handler(event, context):
         )
 
         # Send response back via WhatsApp
-        whatsapp = MetaWhatsAppInterface()
+        whatsapp = get_whatsapp()
         success = whatsapp.send_text_response(
             phone_number=sender_id,
             text=response.text,
@@ -1393,6 +1448,22 @@ def handler(event, context):
 
         if not success:
             print(f"Failed to send WhatsApp response to {sender_id}")
+
+        # Send NDVI heatmap image if available
+        image_sent = False
+        if response.image_url:
+            try:
+                image_sent = whatsapp.send_image(
+                    phone_number=sender_id,
+                    image_url=response.image_url,
+                    caption=response.image_caption or 'NDVI Crop Health Map'
+                )
+                if image_sent:
+                    print(f"Sent NDVI heatmap image to {sender_id}")
+                else:
+                    print(f"Failed to send heatmap image to {sender_id}")
+            except Exception as img_err:
+                print(f"Error sending heatmap image: {img_err}")
 
         return {
             'statusCode': 200,
@@ -1403,7 +1474,8 @@ def handler(event, context):
                 'tier_used': response.tier_used,
                 'conversation_id': response.conversation_id,
                 'timestamp': response.timestamp,
-                'whatsapp_sent': success
+                'whatsapp_sent': success,
+                'heatmap_sent': image_sent,
             })
         }
 
@@ -1416,7 +1488,7 @@ def handler(event, context):
         try:
             sender_id = event.get('sender_id', '')
             if sender_id:
-                whatsapp = MetaWhatsAppInterface()
+                whatsapp = get_whatsapp()
                 error_messages = {
                     'en': 'Sorry, I encountered an error. Please try again.',
                     'hi-IN': 'क्षमा करें, त्रुटि हुई। कृपया पुनः प्रयास करें।',

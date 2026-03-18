@@ -26,6 +26,7 @@ from knowledge_base import (
 class TestKnowledgeBaseRetrieval:
     """Test knowledge base retrieval functionality"""
     
+    @patch('knowledge_base.KB_ID', 'test-kb-id')
     @patch('knowledge_base.bedrock_agent_runtime')
     def test_retrieve_from_kb_success(self, mock_bedrock):
         """Test successful retrieval from knowledge base"""
@@ -84,6 +85,7 @@ class TestKnowledgeBaseRetrieval:
 class TestRetrieveAndGenerate:
     """Test retrieve_and_generate functionality"""
     
+    @patch('knowledge_base.KB_ID', 'test-kb-id')
     @patch('knowledge_base.bedrock_agent_runtime')
     def test_retrieve_and_generate_success(self, mock_bedrock):
         """Test successful retrieve_and_generate"""
@@ -119,6 +121,7 @@ class TestRetrieveAndGenerate:
         # Verify API call
         mock_bedrock.retrieve_and_generate.assert_called_once()
     
+    @patch('knowledge_base.KB_ID', 'test-kb-id')
     @patch('knowledge_base.bedrock_agent_runtime')
     def test_retrieve_and_generate_with_context(self, mock_bedrock):
         """Test retrieve_and_generate with additional context"""
@@ -364,6 +367,7 @@ class TestLambdaHandler:
 class TestCostOptimization:
     """Test cost optimization aspects"""
     
+    @patch('knowledge_base.KB_ID', 'test-kb-id')
     @patch('knowledge_base.bedrock_agent_runtime')
     def test_retrieve_and_generate_reduces_context_size(self, mock_bedrock):
         """
@@ -396,6 +400,7 @@ class TestCostOptimization:
         assert len(result['response']) > 0
         assert 'answer' in result['response'].lower() or 'based' in result['response'].lower()
     
+    @patch('knowledge_base.KB_ID', 'test-kb-id')
     @patch('knowledge_base.bedrock_agent_runtime')
     def test_retrieval_limits_number_of_results(self, mock_bedrock):
         """Test that retrieval limits results to avoid excessive context"""

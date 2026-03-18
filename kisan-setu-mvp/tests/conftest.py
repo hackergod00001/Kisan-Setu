@@ -224,6 +224,17 @@ def sample_message():
     )
 
 
+@pytest.fixture(autouse=True)
+def reset_circuit_breakers_and_cache():
+    """Reset circuit breaker and cache state before each test to prevent cross-test pollution."""
+    from common.error_handling import _circuit_breakers
+    from common.cost_optimization import cache_manager
+    _circuit_breakers.clear()
+    cache_manager.in_memory_cache.clear()
+    yield
+    _circuit_breakers.clear()
+
+
 # Pytest configuration
 def pytest_configure(config):
     """Configure pytest with custom markers."""

@@ -45,7 +45,7 @@ def sample_transactions():
             'crop_type': 'onion',
             'timestamp': (base_date - timedelta(days=90)).isoformat(),
             'ledger_image_url': 's3://bucket/image1.jpg',
-            'status': 'success',
+            'status': 'completed',
             'payment_status': 'timely'
         },
         {
@@ -58,7 +58,7 @@ def sample_transactions():
             'crop_type': 'onion',
             'timestamp': (base_date - timedelta(days=60)).isoformat(),
             'ledger_image_url': 's3://bucket/image2.jpg',
-            'status': 'success',
+            'status': 'completed',
             'payment_status': 'timely'
         },
         {
@@ -71,7 +71,7 @@ def sample_transactions():
             'crop_type': 'onion',
             'timestamp': (base_date - timedelta(days=30)).isoformat(),
             'ledger_image_url': 's3://bucket/image3.jpg',
-            'status': 'success',
+            'status': 'completed',
             'payment_status': 'timely'
         }
     ]
@@ -194,12 +194,12 @@ class TestCreditEngine:
             {
                 'quantity': 5000.0,
                 'timestamp': datetime.utcnow().isoformat(),
-                'status': 'success'
+                'status': 'completed'
             },
             {
                 'quantity': 6000.0,
                 'timestamp': datetime.utcnow().isoformat(),
-                'status': 'success'
+                'status': 'completed'
             }
         ]
         
@@ -210,8 +210,10 @@ class TestCreditEngine:
         # With 11000 volume, expect around 5-6 points
         assert score > 5
     
-    def test_calculate_financial_behavior_range(self, credit_engine, sample_transactions):
+    def test_calculate_financial_behavior_range(self, credit_engine, mock_table, sample_transactions):
         """Test that financial behavior score is within 0-15 range."""
+        # _calculate_dues_score now queries DynamoDB, so set up the mock
+        mock_table.query.return_value = {'Items': sample_transactions}
         score = credit_engine.calculate_financial_behavior('FARMER#123', sample_transactions)
         
         assert 0 <= score <= 15
@@ -297,7 +299,7 @@ class TestEdgeCases:
             'crop_type': 'onion',
             'timestamp': datetime.utcnow().isoformat(),
             'ledger_image_url': 's3://bucket/image.jpg',
-            'status': 'success',
+            'status': 'completed',
             'payment_status': 'timely'
         }]
         
@@ -322,3 +324,110 @@ class TestEdgeCases:
         # Should not raise exception
         score = credit_engine.calculate_quality_metrics('FARMER#123', transactions)
         assert score >= 0
+
+
+class TestCalculateDuesScore:
+    """Tests for the _calculate_dues_score method (Task 4.1.1 & 4.1.2)."""
+
+    def test_dues_score_queries_dynamodb(self, credit_engine, mock_table):
+        """Test that _calculate_dues_score queries DynamoDB instead of returning hardcoded value."""
+        mock_table.query.return_value = {'Items': [
+            {'payment_status': 'timely'},
+            {'payment_status': 'timely'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('FARMER#123')
+
+        # Should have queried DynamoDB
+        mock_table.query.assert_called_once()
+        call_kwargs = mock_table.query.call_args[1]
+        assert call_kwargs['ExpressionAttributeValues'][':pk'] == 'FARMER#123'
+        assert call_kwargs['ExpressionAttributeValues'][':sk'] == 'TXN#'
+
+    def test_dues_score_all_paid_returns_max(self, credit_engine, mock_table):
+        """Test that all paid dues returns max score of 15.0."""
+        mock_table.query.return_value = {'Items': [
+            {'payment_status': 'timely'},
+            {'payment_status': 'paid'},
+            {'payment_status': 'timely'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('F001')
+        assert score == 15.0
+
+    def test_dues_score_all_outstanding_returns_zero(self, credit_engine, mock_table):
+        """Test that all outstanding dues returns 0."""
+        mock_table.query.return_value = {'Items': [
+            {'payment_status': 'overdue'},
+            {'payment_status': 'pending'},
+            {'payment_status': 'late'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('F001')
+        assert score == 0.0
+
+    def test_dues_score_mixed_returns_proportional(self, credit_engine, mock_table):
+        """Test that mixed paid/outstanding returns proportional score."""
+        mock_table.query.return_value = {'Items': [
+            {'payment_status': 'timely'},
+            {'payment_status': 'overdue'},
+            {'payment_status': 'paid'},
+            {'payment_status': 'late'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('F001')
+        # 2 paid out of 4 = 50% => 15.0 * 0.5 = 7.5
+        assert score == pytest.approx(7.5)
+
+    def test_dues_score_no_records_returns_neutral(self, credit_engine, mock_table):
+        """Test that no records returns neutral default score."""
+        mock_table.query.return_value = {'Items': []}
+
+        score = credit_engine._calculate_dues_score('F001')
+        assert score == 7.5
+
+    def test_dues_score_dynamodb_error_returns_neutral(self, credit_engine, mock_table):
+        """Test that DynamoDB errors return neutral default score."""
+        mock_table.query.side_effect = Exception("DynamoDB error")
+
+        score = credit_engine._calculate_dues_score('F001')
+        assert score == 7.5
+
+    def test_dues_score_range(self, credit_engine, mock_table):
+        """Test that dues score is always within 0-15.0 range."""
+        mock_table.query.return_value = {'Items': [
+            {'payment_status': 'timely'},
+            {'payment_status': 'overdue'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('F001')
+        assert 0.0 <= score <= 15.0
+
+    def test_dues_score_no_payment_status_treated_as_outstanding(self, credit_engine, mock_table):
+        """Test that records without payment_status are treated as outstanding."""
+        mock_table.query.return_value = {'Items': [
+            {'quantity': 500},  # no payment_status
+            {'payment_status': 'timely'},
+        ]}
+
+        score = credit_engine._calculate_dues_score('F001')
+        # 1 paid out of 2 = 50% => 15.0 * 0.5 = 7.5
+        assert score == pytest.approx(7.5)
+
+    def test_dues_score_adds_farmer_prefix(self, credit_engine, mock_table):
+        """Test that farmer_id without prefix gets FARMER# prefix added."""
+        mock_table.query.return_value = {'Items': []}
+
+        credit_engine._calculate_dues_score('F001')
+
+        call_kwargs = mock_table.query.call_args[1]
+        assert call_kwargs['ExpressionAttributeValues'][':pk'] == 'FARMER#F001'
+
+    def test_dues_score_preserves_existing_prefix(self, credit_engine, mock_table):
+        """Test that farmer_id with existing FARMER# prefix is not double-prefixed."""
+        mock_table.query.return_value = {'Items': []}
+
+        credit_engine._calculate_dues_score('FARMER#F001')
+
+        call_kwargs = mock_table.query.call_args[1]
+        assert call_kwargs['ExpressionAttributeValues'][':pk'] == 'FARMER#F001'

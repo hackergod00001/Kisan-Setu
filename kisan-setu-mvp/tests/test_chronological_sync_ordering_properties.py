@@ -8,6 +8,7 @@ order based on their timestamps (oldest first).
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda'))
+sys.path.insert(0, os.path.dirname(__file__))
 
 import pytest
 import sqlite3
@@ -24,7 +25,7 @@ from generators import transaction_data
 
 # Import models and sync manager
 from common.models import Transaction, SyncStatus
-from sync.sync_manager import SyncManager
+from lib.sync_manager import SyncManager
 
 
 class TestChronologicalSyncOrdering:

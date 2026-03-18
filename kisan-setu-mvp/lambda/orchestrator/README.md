@@ -2,18 +2,88 @@
 
 ## Overview
 
-The Bedrock Orchestration Component uses the LLM Adapter with a 5-model APAC inference profile fallback chain to orchestrate complex multi-step requests, decompose tasks, invoke appropriate tools, and maintain conversation context.
+The Bedrock Orchestration Component is the central AI brain of Kisan-Setu. It handles all text-based interactions, performs intent detection, invokes sub-Lambdas (CreditCalculator, SatelliteAnalyzer, KnowledgeBase), and maintains conversation context.
 
-The text model fallback chain is: Nova Pro → Nova Lite → Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Claude 3 Haiku (all via APAC inference profiles). For multimodal (image) processing: Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Nova Pro → Claude 3 Haiku → Nova Lite. Each model has a circuit breaker (3 failures → 60s cooldown) and exponential backoff retries.
+It uses the LLM Adapter with a 5-model APAC inference profile fallback chain via the Bedrock Converse API. The text model fallback chain is: Nova Pro → Nova Lite → Claude 3.7 Sonnet → Claude 3.5 Sonnet v2 → Claude 3 Haiku. Each model has a circuit breaker (3 failures → 60s cooldown) and exponential backoff retries.
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Input["Input Sources"]
+        ROUTER["MessageRouter<br/>(text messages, async)"]
+        VOICE["VoiceHandler<br/>(transcribed text, async)"]
+    end
+
+    subgraph Orchestrator["BedrockOrchestrator (1024 MB · 180s)"]
+        INTENT["Intent Detection<br/>(_detect_intent)"]
+        MODEL_ROUTER["ModelRouter<br/>(simple/default/complex tier)"]
+        CONTEXT["Conversation Context<br/>(DynamoDB: last 6 messages)"]
+        COST["Cost Tracking<br/>(daily threshold: $2.00)"]
+    end
+
+    subgraph SubLambdas["Sub-Lambda Invocations (sync)"]
+        CREDIT["CreditCalculator"]
+        SAT["SatelliteAnalyzer"]
+        KB["KnowledgeBase"]
+    end
+
+    subgraph AI["AI Layer"]
+        BEDROCK["Bedrock Converse API<br/>(5-model fallback chain)"]
+        STATIC["Static Fallback Response<br/>(if all models fail)"]
+    end
+
+    subgraph Output["Output"]
+        WA["WhatsApp Response<br/>(via MetaWhatsAppInterface)"]
+        DB["DynamoDB<br/>(CONVERSATION#sender / CHAT#ts)"]
+    end
+
+    ROUTER --> INTENT
+    VOICE --> INTENT
+    INTENT -->|"credit"| CREDIT
+    INTENT -->|"satellite"| SAT
+    INTENT -->|"transaction"| CONTEXT
+    INTENT -->|"general"| MODEL_ROUTER
+    MODEL_ROUTER --> BEDROCK
+    BEDROCK --> WA
+    BEDROCK --> DB
+    CREDIT --> WA
+    SAT --> WA
+    COST --> MODEL_ROUTER
+```
+
+## Intent Detection Flow
+
+```mermaid
+flowchart TD
+    MSG["Incoming Text Message"] --> DETECT["_detect_intent()"]
+    DETECT -->|"transaction keywords<br/>(create ledger, save ledger, khata banao)<br/>OR quantity+crop+price pattern"| TXN["Transaction Intent<br/>→ Create ledger entry from text"]
+    DETECT -->|"credit keywords<br/>(credit score, loan, rin, karj)"| CREDIT["Credit Intent<br/>→ Invoke CreditCalculator Lambda"]
+    DETECT -->|"satellite keywords<br/>(crop health, ndvi, fasal swasthya)<br/>Hindi/Marathi/Tamil/English"| SAT["Satellite Intent<br/>→ Invoke SatelliteAnalyzer Lambda"]
+    DETECT -->|"No match"| GENERAL["General Query<br/>→ Bedrock Converse API"]
+
+    TXN --> PARSE["Parse quantity, crop, price<br/>from message text"]
+    PARSE --> STORE["Store as LedgerData in DynamoDB"]
+
+    CREDIT --> FORMAT["Format credit response<br/>(score, breakdown, loan eligibility)"]
+
+    GENERAL --> TIER["ModelRouter.classify_query()"]
+    TIER -->|"simple patterns"| NOVA_LITE["Nova Lite (secondary)"]
+    TIER -->|"complex patterns"| NOVA_PRO["Nova Pro (primary)"]
+    TIER -->|"default"| NOVA_PRO_D["Nova Pro (default)"]
+```
 
 ## Features
 
-- **Intelligent Request Processing**: Uses Bedrock Agent to understand and process complex farmer queries
-- **Task Decomposition**: Automatically breaks down multi-step requests into sub-tasks
-- **Tool Invocation**: Invokes appropriate AWS services (Textract, SageMaker, Transcribe) based on request type
-- **Conversation Context**: Maintains conversation history in DynamoDB for contextual responses
-- **Error Handling**: Gracefully handles errors and provides user-friendly messages
-- **Multilingual Support**: Supports Hindi, Marathi, and Tamil through language context
+- **Intent Detection**: Pattern-matching for credit, satellite, transaction, and general queries (supports Hindi, Marathi, Tamil, English)
+- **Task Decomposition**: Breaks complex requests into ordered sub-tasks with dependencies
+- **Sub-Lambda Invocation**: Calls CreditCalculator, SatelliteAnalyzer, KnowledgeBase via synchronous `lambda:InvokeFunction`
+- **Voice Ledger Creation**: Parses transaction data from voice transcriptions (quantity + crop + price patterns)
+- **Conversation Context**: Stores/retrieves last 6 messages from DynamoDB (`CONVERSATION#{sender}` / `CHAT#{ts}#role`)
+- **Tiered Model Routing**: Classifies queries as simple/default/complex for cost optimization
+- **Daily Cost Threshold**: Auto-downgrades to Nova Lite when daily cost exceeds $2.00
+- **Static Fallback**: Returns hardcoded helpful response if all 5 models fail
+- **Multilingual Support**: System prompt enforces language consistency (Hindi, Marathi, Tamil, English)
 
 ## Requirements Implemented
 
@@ -23,339 +93,48 @@ The text model fallback chain is: Nova Pro → Nova Lite → Claude 3.7 Sonnet �
 - **Requirement 7.4**: Maintain conversation history and reference prior interactions
 - **Requirement 7.5**: Handle errors gracefully and inform user of partial results
 
-## Architecture
+## Lambda Configuration
 
-```
-User Message → BedrockOrchestrator.process_request()
-                ↓
-            Maintain Context (DynamoDB)
-                ↓
-            Invoke Bedrock Agent
-                ↓
-            Agent Reasoning & Tool Selection
-                ↓
-            Invoke Tools (Lambda Functions)
-                ↓
-            Combine Results
-                ↓
-            Generate Response
-                ↓
-            Store in Context
-                ↓
-            Return to User
-```
-
-## Class: BedrockOrchestrator
-
-### Methods
-
-#### `process_request(user_message, conversation_history, sender_id, language)`
-
-Processes user request using Bedrock Agent.
-
-**Parameters:**
-- `user_message` (str): User's text message
-- `conversation_history` (List[Message]): List of previous messages
-- `sender_id` (str): User's phone number or ID
-- `language` (str): User's preferred language (default: 'en')
-
-**Returns:**
-- `Response`: Response object with text, actions taken, and tool calls
-
-**Example:**
-```python
-orchestrator = BedrockOrchestrator()
-response = orchestrator.process_request(
-    user_message="What is my credit score?",
-    conversation_history=[],
-    sender_id="919876543210",
-    language="en"
-)
-print(response.text)  # "Your credit score is 85/100..."
-```
-
-#### `decompose_task(complex_request)`
-
-Decomposes complex request into ordered sub-tasks.
-
-**Parameters:**
-- `complex_request` (str): Complex multi-step request
-
-**Returns:**
-- `List[SubTask]`: List of SubTask objects with dependencies
-
-**Example:**
-```python
-subtasks = orchestrator.decompose_task(
-    "Process this ledger and calculate my credit score"
-)
-# Returns: [SubTask(tool_name='document_processor'), SubTask(tool_name='credit_calculator')]
-```
-
-#### `invoke_tool(tool_name, parameters)`
-
-Invokes external tool (Textract, SageMaker, Transcribe, etc.).
-
-**Parameters:**
-- `tool_name` (str): Name of the tool to invoke
-- `parameters` (Dict[str, Any]): Tool parameters
-
-**Returns:**
-- `ToolResult`: Result with data and status
-
-**Supported Tools:**
-- `document_processor` / `textract`: Document processing
-- `voice_agent` / `transcribe`: Voice transcription
-- `satellite_analyzer` / `sagemaker`: Satellite analysis
-- `credit_calculator`: Credit score calculation
-
-**Example:**
-```python
-result = orchestrator.invoke_tool(
-    'document_processor',
-    {'image_url': 's3://bucket/ledger.jpg'}
-)
-print(result.data)  # {'quantity': 100, 'moisture': 12.5, ...}
-```
-
-#### `maintain_context(conversation_id, new_message)`
-
-Updates and retrieves conversation context.
-
-**Parameters:**
-- `conversation_id` (str): Conversation ID
-- `new_message` (Message): New message to add
-
-**Returns:**
-- `ConversationContext`: Context with history and state
-
-**Example:**
-```python
-message = Message(
-    message_id='msg-123',
-    sender_id='919876543210',
-    content='Hello',
-    timestamp=datetime.utcnow().isoformat(),
-    language='en'
-)
-context = orchestrator.maintain_context('CONV#919876543210#20260302', message)
-print(len(context.history))  # Number of previous messages
-```
-
-## Data Structures
-
-### Message
-```python
-@dataclass
-class Message:
-    message_id: str
-    sender_id: str
-    content: str
-    timestamp: str
-    language: str = 'en'
-    message_type: str = 'text'
-```
-
-### SubTask
-```python
-@dataclass
-class SubTask:
-    task_id: str
-    description: str
-    tool_name: str
-    parameters: Dict[str, Any]
-    dependencies: List[str]
-    status: str = 'pending'
-```
-
-### ToolResult
-```python
-@dataclass
-class ToolResult:
-    tool_name: str
-    status: str
-    data: Any
-    error: Optional[str] = None
-```
-
-### Response
-```python
-@dataclass
-class Response:
-    text: str
-    actions_taken: List[str]
-    tool_calls: List[Dict[str, Any]]
-    conversation_id: str
-    timestamp: str
-```
-
-### ConversationContext
-```python
-@dataclass
-class ConversationContext:
-    conversation_id: str
-    farmer_id: str
-    history: List[Dict[str, Any]]
-    state: Dict[str, Any]
-    last_updated: str
-```
-
-## Lambda Handler
-
-The `handler` function is the entry point for AWS Lambda.
-
-**Event Structure:**
-```json
-{
-  "sender_id": "919876543210",
-  "message_text": "What is my credit score?",
-  "language": "en",
-  "conversation_history": []
-}
-```
-
-**Response Structure:**
-```json
-{
-  "statusCode": 200,
-  "body": {
-    "response_text": "Your credit score is 85/100...",
-    "actions_taken": ["reasoning", "tool_invocation"],
-    "tool_calls": [...],
-    "conversation_id": "CONV#919876543210#20260302",
-    "timestamp": "2026-03-02T10:00:00"
-  }
-}
-```
+| Property | Value |
+|----------|-------|
+| Runtime | Python 3.11 |
+| Memory | 1024 MB |
+| Timeout | 180s |
+| Handler | `orchestrator.handler` |
 
 ## Environment Variables
 
-- `DYNAMODB_TABLE`: DynamoDB table name (default: 'KisanSetuData')
-- `REGION`: AWS region (default: 'ap-south-1')
-- `BEDROCK_AGENT_ID`: Bedrock Agent ID
-- `BEDROCK_AGENT_ALIAS_ID`: Bedrock Agent Alias ID
-- `DOCUMENT_PROCESSOR_FUNCTION`: Document processor Lambda function name
-- `VOICE_AGENT_FUNCTION`: Voice agent Lambda function name
-- `SATELLITE_ANALYZER_FUNCTION`: Satellite analyzer Lambda function name
-- `CREDIT_CALCULATOR_FUNCTION`: Credit calculator Lambda function name
+| Variable | Purpose |
+|----------|---------|
+| `DYNAMODB_TABLE` | DynamoDB table name (default: `KisanSetuData`) |
+| `REGION` | AWS region (default: `ap-south-1`) |
+| `DOCUMENT_PROCESSOR_FUNCTION` | DocumentProcessor Lambda function name |
+| `VOICE_AGENT_FUNCTION` | VoiceHandler Lambda function name |
+| `SATELLITE_ANALYZER_FUNCTION` | SatelliteAnalyzer Lambda function name |
+| `CREDIT_CALCULATOR_FUNCTION` | CreditCalculator Lambda function name |
+| `KNOWLEDGE_BASE_FUNCTION` | KnowledgeBase Lambda function name |
+| `WHATSAPP_SECRET_NAME` | Secrets Manager secret for WhatsApp credentials |
+| `DAILY_COST_THRESHOLD` | Daily cost limit in USD (default: `2.0`) |
 
-## DynamoDB Schema
+## Tool Mapping
 
-### Conversation Messages
-```
-PK: CONV#{sender_id}#{date}
-SK: MSG#{timestamp}
-Attributes:
-  - message_id
-  - sender_id
-  - content
-  - timestamp
-  - language
-  - message_type
-```
+| Tool Name | Lambda Function |
+|-----------|----------------|
+| `document_processor` / `textract` | DocumentProcessor |
+| `voice_agent` / `transcribe` | VoiceHandler |
+| `satellite_analyzer` / `sagemaker` | SatelliteAnalyzer |
+| `credit_calculator` | CreditCalculator |
+| `knowledge_base` / `retrieve_and_generate` | KnowledgeBase |
 
-### Conversation Responses
-```
-PK: CONV#{sender_id}#{date}
-SK: RESPONSE#{timestamp}
-Attributes:
-  - response_text
-  - actions_taken
-  - tool_calls
-  - timestamp
-```
+## DynamoDB Key Patterns
 
-## Integration with Bedrock Agent
-
-The orchestrator integrates with AWS Bedrock Agent configured with:
-
-- **LLM Adapter**: 5-model APAC inference profile fallback chain via Converse API
-  - Tier 1: Amazon Nova Pro (`apac.amazon.nova-pro-v1:0`)
-  - Tier 2: Amazon Nova Lite (`apac.amazon.nova-lite-v1:0`)
-  - Tier 3: Claude 3.7 Sonnet (`apac.anthropic.claude-3-7-sonnet-20250219-v1:0`)
-  - Tier 4: Claude 3.5 Sonnet v2 (`apac.anthropic.claude-3-5-sonnet-20241022-v2:0`)
-  - Tier 5: Claude 3 Haiku (`apac.anthropic.claude-3-haiku-20240307-v1:0`)
-- **Agent ID**: UUQPVM0ULJ (optional — system falls back to direct model calls if agent unavailable)
-- **Alias ID**: A2TGFPMFXZ
-- **Action Groups**: Document processing, satellite analysis, voice processing
-
-### Agent Instruction
-
-The agent is configured with instructions for:
-- FPO operations support
-- Multilingual responses (Hindi, Marathi, Tamil)
-- Ledger digitization guidance
-- Credit score calculation
-- Farming best practices
-
-## Error Handling
-
-The orchestrator implements comprehensive error handling:
-
-1. **Bedrock Agent Errors**: Catches and logs agent invocation errors
-2. **Tool Invocation Errors**: Returns ToolResult with error status
-3. **DynamoDB Errors**: Returns minimal context on database errors
-4. **Unknown Tools**: Returns error message for unsupported tools
-
-All errors are logged and user-friendly messages are returned.
+| Entity | PK | SK |
+|--------|----|----|
+| Conversation Chat | `CONVERSATION#{sender_id}` | `CHAT#{timestamp}#user` or `CHAT#{timestamp}#assistant` |
+| Model Cost Tracking | `SYSTEM#MODEL_COSTS` | `MODEL_COST#{date}` |
 
 ## Testing
 
-Run tests with:
 ```bash
 pytest tests/test_orchestrator.py -v
 ```
-
-Test coverage includes:
-- Request processing (success and error cases)
-- Task decomposition
-- Tool invocation (all tool types)
-- Context maintenance
-- Lambda handler
-- Data structures
-- Tool mapping
-
-## Usage Example
-
-```python
-from orchestrator import BedrockOrchestrator, Message
-
-# Create orchestrator
-orchestrator = BedrockOrchestrator()
-
-# Process a simple query
-response = orchestrator.process_request(
-    user_message="What is my credit score?",
-    conversation_history=[],
-    sender_id="919876543210",
-    language="en"
-)
-print(response.text)
-
-# Process a complex multi-step query
-response = orchestrator.process_request(
-    user_message="Process this ledger photo and calculate my credit score",
-    conversation_history=[],
-    sender_id="919876543210",
-    language="hi"
-)
-print(response.text)
-print(response.actions_taken)  # ['reasoning', 'tool_invocation', ...]
-print(response.tool_calls)  # [{'type': 'action_group', ...}]
-```
-
-## Performance Considerations
-
-- **Timeout**: Lambda timeout set to 60 seconds for complex requests
-- **Memory**: 1024 MB allocated for Bedrock Agent invocations
-- **Conversation History**: Limited to last 10 messages for context
-- **Session Attributes**: Includes last 5 messages for agent context
-
-## Future Enhancements
-
-- [ ] Add support for more languages (Punjabi, Bengali, etc.)
-- [ ] Implement conversation summarization for long histories
-- [ ] Add caching for frequently asked questions
-- [ ] Implement streaming responses for real-time feedback
-- [ ] Add metrics and monitoring for agent performance
-- [ ] Implement A/B testing for different agent prompts

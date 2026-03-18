@@ -17,8 +17,7 @@ from hypothesis import given, settings, strategies as st
 from typing import Dict, Any
 from unittest.mock import Mock
 
-# Add lambda directories to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda', 'processor'))
+# Add lambda directories to path (conftest.py adds 'lambda/' already)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda'))
 
 from processor.processor import DocumentProcessor, LedgerData
@@ -301,13 +300,16 @@ def test_property_4_multi_script_ocr_support(script, image_url, data):
         dynamodb_table=Mock()
     )
     
-    # Extract ledger data
-    ledger_data = processor.extract_ledger_data(image_url, language=language)
-    
+    # Extract ledger data (returns a list of LedgerData)
+    ledger_data_list = processor.extract_ledger_data(image_url, language=language)
+
     # Property 1: Extraction completes successfully
+    assert isinstance(ledger_data_list, list) and len(ledger_data_list) > 0, \
+        f"Extraction should succeed for {script} script and return a non-empty list"
+    ledger_data = ledger_data_list[0]
     assert isinstance(ledger_data, LedgerData), \
-        f"Extraction should succeed for {script} script and return LedgerData object"
-    
+        f"First item should be a LedgerData object for {script} script"
+
     # Property 2: All required fields are present
     assert ledger_data.farmer_name is not None, \
         f"farmer_name should be extracted for {script} script"
@@ -435,14 +437,17 @@ def test_property_4_all_scripts_supported(image_url, data):
             dynamodb_table=Mock()
         )
         
-        # Extract ledger data
+        # Extract ledger data (returns a list of LedgerData)
         try:
-            ledger_data = processor.extract_ledger_data(image_url, language=language)
-            
+            ledger_data_list = processor.extract_ledger_data(image_url, language=language)
+
             # Property: Extraction succeeds for all supported scripts
+            assert isinstance(ledger_data_list, list) and len(ledger_data_list) > 0, \
+                f"DocumentProcessor should return a non-empty list for {script} script"
+            ledger_data = ledger_data_list[0]
             assert isinstance(ledger_data, LedgerData), \
-                f"DocumentProcessor should successfully extract data for {script} script"
-            
+                f"First item should be a LedgerData object for {script} script"
+
             assert ledger_data.farmer_name is not None, \
                 f"farmer_name should be extracted for {script} script"
             
@@ -559,8 +564,10 @@ def test_mixed_script_handling():
         dynamodb_table=Mock()
     )
     
-    ledger_data = processor.extract_ledger_data('s3://test/image.jpg', language='hi-IN')
-    
+    ledger_data_list = processor.extract_ledger_data('s3://test/image.jpg', language='hi-IN')
+    assert len(ledger_data_list) > 0
+    ledger_data = ledger_data_list[0]
+
     # Should handle mixed scripts correctly
     assert ledger_data.farmer_name == 'राजेश Kumar'
     assert ledger_data.crop_type == 'गेहूं'
@@ -671,8 +678,10 @@ def test_tamil_specific_characters():
         dynamodb_table=Mock()
     )
     
-    ledger_data = processor.extract_ledger_data('s3://test/image.jpg', language='ta-IN')
-    
+    ledger_data_list = processor.extract_ledger_data('s3://test/image.jpg', language='ta-IN')
+    assert len(ledger_data_list) > 0
+    ledger_data = ledger_data_list[0]
+
     # Should correctly extract Tamil text
     assert ledger_data.farmer_name == 'முருகன்'
     assert ledger_data.crop_type == 'அரிசி'

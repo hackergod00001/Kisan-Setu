@@ -8,12 +8,31 @@ import os
 import boto3
 from typing import Dict, List, Any, Optional
 
-# Initialize clients
-bedrock_agent_runtime = boto3.client('bedrock-agent-runtime', region_name=os.environ.get('REGION', 'us-east-1'))
+# Initialize clients — Bedrock Knowledge Base runs in ap-south-1
+REGION = os.environ.get('REGION', 'ap-south-1')
+bedrock_agent_runtime = boto3.client(
+    'bedrock-agent-runtime',
+    region_name=REGION
+)
 
 # Configuration
 KB_ID = os.environ.get('KNOWLEDGE_BASE_ID', '')
-MODEL_ARN = 'arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
+MODEL_ARN = f'arn:aws:bedrock:{REGION}::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
+
+
+def _validate_kb_config():
+    """
+    Validate that KNOWLEDGE_BASE_ID is configured.
+    Raises a clear error at invocation time rather than failing with
+    a cryptic Bedrock API error.
+    """
+    if not KB_ID:
+        raise EnvironmentError(
+            "KNOWLEDGE_BASE_ID environment variable is not set. "
+            "Run setup_knowledge_base.py and update the CDK stack or "
+            "set the env var directly on the Lambda function. "
+            "See personal_go_to_task.md Issue #2."
+        )
 
 def retrieve_from_kb(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
     """
@@ -27,6 +46,7 @@ def retrieve_from_kb(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         List of retrieved documents with content and metadata
     """
     try:
+        _validate_kb_config()
         response = bedrock_agent_runtime.retrieve(
             knowledgeBaseId=KB_ID,
             retrievalQuery={
@@ -67,6 +87,8 @@ def retrieve_and_generate(query: str, context: Optional[str] = None) -> Dict[str
         Dict with generated response and retrieved sources
     """
     try:
+        _validate_kb_config()
+
         # Build retrieval configuration
         retrieval_config = {
             'knowledgeBaseId': KB_ID,

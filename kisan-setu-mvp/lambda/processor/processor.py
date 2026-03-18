@@ -939,6 +939,18 @@ Respond ONLY with JSON: {{"crop_type": "...", "quantity": "...", "price": "...",
 
 # ==================== Lambda Handler ====================
 
+# Module-level WhatsApp interface for warm invocation reuse
+_whatsapp = None
+
+
+def get_whatsapp():
+    """Lazy-init helper: returns the module-level MetaWhatsAppInterface, creating it on first call."""
+    global _whatsapp
+    if _whatsapp is None:
+        _whatsapp = MetaWhatsAppInterface()
+    return _whatsapp
+
+
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     Lambda handler for document processing.
@@ -1012,7 +1024,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         # Send response to WhatsApp
-        whatsapp = MetaWhatsAppInterface()
+        whatsapp = get_whatsapp()
         success = whatsapp.send_text_response(
             phone_number=sender,
             text=response_text,
@@ -1084,7 +1096,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         try:
             sender = event.get('sender')
             if sender:
-                whatsapp = MetaWhatsAppInterface()
+                whatsapp = get_whatsapp()
                 error_messages = {
                     'en': 'Sorry, I could not process your image. Please make sure the image is clear and try again.',
                     'hi-IN': 'क्षमा करें, मैं आपकी छवि संसाधित नहीं कर सका। कृपया सुनिश्चित करें कि छवि स्पष्ट है और पुनः प्रयास करें।',
@@ -1118,8 +1130,8 @@ def download_and_upload_image(image_id: str, sender: str) -> str:
         S3 key where image was uploaded
     """
     try:
-        # Initialize WhatsApp interface
-        whatsapp = MetaWhatsAppInterface()
+        # Reuse module-level WhatsApp interface for warm invocation benefits
+        whatsapp = get_whatsapp()
 
         # Download media from WhatsApp (returns S3 URL if already uploaded)
         print(f"Downloading image {image_id} from WhatsApp...")

@@ -1,6 +1,19 @@
 """
-AppSync Sync Handler Lambda
-Handles syncOfflineTransactions mutation with conflict resolution
+AppSync Sync Handler Lambda — THE DEPLOYED sync handler.
+=========================================================
+
+Handles syncOfflineTransactions mutation with conflict resolution.
+This is the actual Lambda handler referenced in CDK (infrastructure_stack.py).
+
+Note: sync_manager.py has been moved to tests/lib/sync_manager.py.
+It is a test-only utility and is NOT deployed with this Lambda.
+See Issue #5 in personal_go_to_task.md for details.
+
+AUDIT TRAIL GAP: This handler performs direct boto3 DynamoDB writes (transaction
+sync, conflict resolution puts) that bypass the centralised DynamoDBAccess class
+and its audit trails. To close this gap, either migrate write paths to
+DynamoDBAccess or enable DynamoDB Streams on the KisanSetuData table to capture
+all mutations for audit/compliance purposes.
 """
 
 import json
@@ -68,6 +81,8 @@ def sync_transaction(txn: Dict[str, Any]) -> Dict[str, Any]:
     
     # Check if transaction already exists
     try:
+        # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+        # Consider migrating to DynamoDBAccess for audit compliance.
         response = table.get_item(
             Key={'PK': pk, 'SK': sk}
         )
@@ -137,5 +152,7 @@ def put_transaction(pk: str, sk: str, txn: Dict[str, Any]):
     if 'ledgerImageUrl' in txn and txn['ledgerImageUrl']:
         item['ledgerImageUrl'] = txn['ledgerImageUrl']
     
+    # NOTE: Direct boto3 DynamoDB call — bypasses DynamoDBAccess audit trails.
+    # Consider migrating to DynamoDBAccess for audit compliance.
     table.put_item(Item=item)
     print(f"Successfully synced transaction {txn['transactionId']}")

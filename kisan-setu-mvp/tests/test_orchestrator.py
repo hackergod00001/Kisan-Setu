@@ -17,8 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda', 'comm
 
 from orchestrator import (
     BedrockOrchestrator, Message, SubTask, ToolResult, Response,
-    ConversationContext, handler
+    ConversationContext, handler, get_orchestrator
 )
+import orchestrator as orchestrator_module
 
 
 @pytest.fixture
@@ -50,8 +51,6 @@ def mock_env(monkeypatch):
     """Mock environment variables"""
     monkeypatch.setenv('DYNAMODB_TABLE', 'TestTable')
     monkeypatch.setenv('REGION', 'ap-south-1')
-    monkeypatch.setenv('BEDROCK_AGENT_ID', 'test-agent-id')
-    monkeypatch.setenv('BEDROCK_AGENT_ALIAS_ID', 'test-alias-id')
     monkeypatch.setenv('DOCUMENT_PROCESSOR_FUNCTION', 'TestDocProcessor')
     monkeypatch.setenv('VOICE_AGENT_FUNCTION', 'TestVoiceAgent')
     monkeypatch.setenv('SATELLITE_ANALYZER_FUNCTION', 'TestSatellite')
@@ -69,8 +68,6 @@ class TestBedrockOrchestrator:
 
         orchestrator = orch_module.BedrockOrchestrator()
 
-        assert orchestrator.agent_id == 'test-agent-id'
-        assert orchestrator.agent_alias_id == 'test-alias-id'
         assert orchestrator.table is not None
 
     def test_process_request_success(self, mock_env, mock_aws_clients):
@@ -232,6 +229,15 @@ class TestBedrockOrchestrator:
         assert context.farmer_id == '919876543210'
         assert context.state['language'] == 'en'
 
+        # Verify TTL attribute is set on the stored conversation item
+        put_call = mock_aws_clients['table'].put_item.call_args
+        item = put_call[1]['Item'] if 'Item' in put_call[1] else put_call[0][0]
+        assert 'ttl' in item
+        import time as _time
+        expected_ttl_approx = int(_time.time()) + (30 * 24 * 60 * 60)
+        # Allow 5 seconds tolerance
+        assert abs(item['ttl'] - expected_ttl_approx) < 5
+
     def test_maintain_context_existing_conversation(self, mock_env, mock_aws_clients):
         """Test context maintenance for existing conversation"""
         orchestrator = BedrockOrchestrator()
@@ -288,9 +294,62 @@ class TestBedrockOrchestrator:
         assert context.farmer_id == '919876543210'
         assert len(context.history) == 0
 
+    def test_store_conversation_includes_ttl(self, mock_env, mock_aws_clients):
+        """Test that _store_conversation adds TTL to both user and assistant items"""
+        orchestrator = BedrockOrchestrator()
+        mock_aws_clients['table'].put_item.return_value = {}
+
+        orchestrator._store_conversation(
+            sender_id='919876543210',
+            conversation_id='CONV-919876543210-20260302',
+            user_message='Hello',
+            response_text='Namaste!'
+        )
+
+        # Two put_item calls: user message + assistant response
+        assert mock_aws_clients['table'].put_item.call_count == 2
+
+        import time as _time
+        expected_ttl_approx = int(_time.time()) + (30 * 24 * 60 * 60)
+
+        for call in mock_aws_clients['table'].put_item.call_args_list:
+            item = call[1]['Item'] if 'Item' in call[1] else call[0][0]
+            assert 'ttl' in item, f"TTL missing from conversation item with role={item.get('role')}"
+            assert abs(item['ttl'] - expected_ttl_approx) < 5
+
+
+class TestGetOrchestrator:
+    """Test module-level lazy-init helper for BedrockOrchestrator"""
+
+    def setup_method(self):
+        """Reset module-level _orchestrator before each test."""
+        orchestrator_module._orchestrator = None
+
+    def test_lazy_init_creates_instance(self, mock_env, mock_aws_clients):
+        """get_orchestrator() creates a BedrockOrchestrator on first call."""
+        result = get_orchestrator()
+        assert result is not None
+        assert type(result).__name__ == 'BedrockOrchestrator'
+
+    def test_lazy_init_returns_same_instance(self, mock_env, mock_aws_clients):
+        """get_orchestrator() returns the same instance on subsequent calls."""
+        first = get_orchestrator()
+        second = get_orchestrator()
+        assert first is second
+
+    def test_module_level_variable_starts_none(self, mock_env, mock_aws_clients):
+        """_orchestrator is None before first call."""
+        assert orchestrator_module._orchestrator is None
+        get_orchestrator()
+        assert orchestrator_module._orchestrator is not None
+
 
 class TestLambdaHandler:
     """Test Lambda handler function"""
+
+    def setup_method(self):
+        """Reset module-level _orchestrator before each test."""
+        orchestrator_module._orchestrator = None
 
     def test_handler_success(self, mock_env, mock_aws_clients):
         """Test successful handler execution"""

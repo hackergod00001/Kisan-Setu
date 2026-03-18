@@ -165,60 +165,56 @@ def test_property_16_positive_significant_change(farmer_and_txns, score_delta):
     # Create mock DynamoDB table
     mock_table = Mock()
     
-    # Calculate what the current score will be
-    temp_engine = CreditEngine(dynamodb_table=Mock())
-    temp_engine._get_farmer_transactions = Mock(return_value=[
-        {
+    # Build transaction items as DynamoDB would return them
+    txn_items = []
+    for txn in transactions:
+        txn_items.append({
+            'PK': txn.farmer_id,
+            'SK': f"TXN#{txn.timestamp.isoformat()}",
             'transaction_id': txn.transaction_id,
             'farmer_id': txn.farmer_id,
             'fpo_id': txn.fpo_id,
-            'quantity': float(txn.quantity),
+            'quantity': Decimal(str(txn.quantity)),
             'crop_type': txn.crop_type,
             'quality_grade': txn.quality_grade,
-            'moisture': float(txn.moisture),
-            'price': float(txn.price),
+            'moisture': Decimal(str(txn.moisture)),
+            'price': Decimal(str(txn.price)),
             'timestamp': txn.timestamp.isoformat(),
             'ledger_image_url': txn.ledger_image_url,
             'sync_status': str(txn.sync_status.value)
-        }
-        for txn in transactions
-    ])
+        })
+
+    # Calculate what the current score will be using a temp engine
+    # with the same table mock so _calculate_dues_score sees the same data
+    def temp_mock_query(**kwargs):
+        sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
+        if sk_prefix == 'TXN#':
+            return {'Items': txn_items}
+        return {'Items': []}
+
+    temp_mock_table = Mock()
+    temp_mock_table.query.side_effect = temp_mock_query
+    temp_mock_table.put_item = Mock()
+    temp_engine = CreditEngine(dynamodb_table=temp_mock_table)
     temp_engine._get_previous_score = Mock(return_value=None)
     temp_engine._store_score = Mock()
     temp_engine._notify_significant_change = Mock()
     temp_score = temp_engine.calculate_reliability_score(farmer.farmer_id)
     current_score = temp_score.total_score
-    
+
     # Set previous score to be score_delta less than current
     previous_score = max(0.0, current_score - score_delta)
-    
+
     # Skip if previous_score ends up being 0 (edge case that's hard to distinguish from no previous score)
     assume(previous_score > 0.1)
-    
+
     # Mock query to return transactions and previous score
     def mock_query(**kwargs):
         pk = kwargs.get('ExpressionAttributeValues', {}).get(':pk')
         sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
-        
+
         if sk_prefix == 'TXN#':
-            items = []
-            for txn in transactions:
-                items.append({
-                    'PK': txn.farmer_id,
-                    'SK': f"TXN#{txn.timestamp.isoformat()}",
-                    'transaction_id': txn.transaction_id,
-                    'farmer_id': txn.farmer_id,
-                    'fpo_id': txn.fpo_id,
-                    'quantity': Decimal(str(txn.quantity)),
-                    'crop_type': txn.crop_type,
-                    'quality_grade': txn.quality_grade,
-                    'moisture': Decimal(str(txn.moisture)),
-                    'price': Decimal(str(txn.price)),
-                    'timestamp': txn.timestamp.isoformat(),
-                    'ledger_image_url': txn.ledger_image_url,
-                    'sync_status': str(txn.sync_status.value)
-                })
-            return {'Items': items}
+            return {'Items': txn_items}
         elif sk_prefix == 'SCORE#':
             return {
                 'Items': [{
@@ -227,23 +223,23 @@ def test_property_16_positive_significant_change(farmer_and_txns, score_delta):
                     'total_score': Decimal(str(previous_score))
                 }]
             }
-        
+
         return {'Items': []}
-    
+
     mock_table.query = Mock(side_effect=mock_query)
     mock_table.put_item = Mock()
-    
+
     # Create CreditEngine
     credit_engine = CreditEngine(dynamodb_table=mock_table)
     credit_engine._notify_significant_change = Mock()
-    
+
     # Calculate reliability score
     score = credit_engine.calculate_reliability_score(farmer.farmer_id)
-    
+
     # Property 1: score_change should be positive and > 10
     assert score.score_change > 10, \
         f"score_change should be > 10 for positive significant change, got {score.score_change:.2f}"
-    
+
     # Property 2: Notification should be triggered
     assert credit_engine._notify_significant_change.called, \
         "Notification should be triggered for positive significant change"
@@ -262,61 +258,56 @@ def test_property_16_negative_significant_change(farmer_and_txns, score_delta):
     Test that negative score changes > 10 points trigger notification.
     """
     farmer, transactions = farmer_and_txns
-    
-    # Create mock DynamoDB table
-    mock_table = Mock()
-    
-    # Calculate what the current score will be
-    temp_engine = CreditEngine(dynamodb_table=Mock())
-    temp_engine._get_farmer_transactions = Mock(return_value=[
-        {
+
+    # Build transaction items as DynamoDB would return them
+    txn_items = []
+    for txn in transactions:
+        txn_items.append({
+            'PK': txn.farmer_id,
+            'SK': f"TXN#{txn.timestamp.isoformat()}",
             'transaction_id': txn.transaction_id,
             'farmer_id': txn.farmer_id,
             'fpo_id': txn.fpo_id,
-            'quantity': float(txn.quantity),
+            'quantity': Decimal(str(txn.quantity)),
             'crop_type': txn.crop_type,
             'quality_grade': txn.quality_grade,
-            'moisture': float(txn.moisture),
-            'price': float(txn.price),
+            'moisture': Decimal(str(txn.moisture)),
+            'price': Decimal(str(txn.price)),
             'timestamp': txn.timestamp.isoformat(),
             'ledger_image_url': txn.ledger_image_url,
             'sync_status': str(txn.sync_status.value)
-        }
-        for txn in transactions
-    ])
+        })
+
+    # Create mock DynamoDB table
+    mock_table = Mock()
+
+    # Calculate what the current score will be using a temp engine
+    def temp_mock_query(**kwargs):
+        sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
+        if sk_prefix == 'TXN#':
+            return {'Items': txn_items}
+        return {'Items': []}
+
+    temp_mock_table = Mock()
+    temp_mock_table.query.side_effect = temp_mock_query
+    temp_mock_table.put_item = Mock()
+    temp_engine = CreditEngine(dynamodb_table=temp_mock_table)
     temp_engine._get_previous_score = Mock(return_value=None)
     temp_engine._store_score = Mock()
     temp_engine._notify_significant_change = Mock()
     temp_score = temp_engine.calculate_reliability_score(farmer.farmer_id)
     current_score = temp_score.total_score
-    
+
     # Set previous score to be score_delta more than current
     previous_score = min(100.0, current_score + score_delta)
-    
+
     # Mock query to return transactions and previous score
     def mock_query(**kwargs):
         pk = kwargs.get('ExpressionAttributeValues', {}).get(':pk')
         sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
-        
+
         if sk_prefix == 'TXN#':
-            items = []
-            for txn in transactions:
-                items.append({
-                    'PK': txn.farmer_id,
-                    'SK': f"TXN#{txn.timestamp.isoformat()}",
-                    'transaction_id': txn.transaction_id,
-                    'farmer_id': txn.farmer_id,
-                    'fpo_id': txn.fpo_id,
-                    'quantity': Decimal(str(txn.quantity)),
-                    'crop_type': txn.crop_type,
-                    'quality_grade': txn.quality_grade,
-                    'moisture': Decimal(str(txn.moisture)),
-                    'price': Decimal(str(txn.price)),
-                    'timestamp': txn.timestamp.isoformat(),
-                    'ledger_image_url': txn.ledger_image_url,
-                    'sync_status': str(txn.sync_status.value)
-                })
-            return {'Items': items}
+            return {'Items': txn_items}
         elif sk_prefix == 'SCORE#':
             return {
                 'Items': [{
@@ -325,23 +316,23 @@ def test_property_16_negative_significant_change(farmer_and_txns, score_delta):
                     'total_score': Decimal(str(previous_score))
                 }]
             }
-        
+
         return {'Items': []}
-    
+
     mock_table.query = Mock(side_effect=mock_query)
     mock_table.put_item = Mock()
-    
+
     # Create CreditEngine
     credit_engine = CreditEngine(dynamodb_table=mock_table)
     credit_engine._notify_significant_change = Mock()
-    
+
     # Calculate reliability score
     score = credit_engine.calculate_reliability_score(farmer.farmer_id)
-    
+
     # Property 1: score_change should be negative and < -10
     assert score.score_change < -10, \
         f"score_change should be < -10 for negative significant change, got {score.score_change:.2f}"
-    
+
     # Property 2: Notification should be triggered (absolute value > 10)
     assert credit_engine._notify_significant_change.called, \
         "Notification should be triggered for negative significant change"
@@ -356,65 +347,60 @@ def test_property_16_insignificant_change_no_notification(farmer_and_txns, small
     """
     **Property 16: Significant Score Change Notification (No Notification)**
     **Validates: Requirements 5.8**
-    
+
     Test that score changes <= 10 points do NOT trigger notification.
     """
     farmer, transactions = farmer_and_txns
-    
-    # Create mock DynamoDB table
-    mock_table = Mock()
-    
-    # Calculate what the current score will be
-    temp_engine = CreditEngine(dynamodb_table=Mock())
-    temp_engine._get_farmer_transactions = Mock(return_value=[
-        {
+
+    # Build transaction items as DynamoDB would return them
+    txn_items = []
+    for txn in transactions:
+        txn_items.append({
+            'PK': txn.farmer_id,
+            'SK': f"TXN#{txn.timestamp.isoformat()}",
             'transaction_id': txn.transaction_id,
             'farmer_id': txn.farmer_id,
             'fpo_id': txn.fpo_id,
-            'quantity': float(txn.quantity),
+            'quantity': Decimal(str(txn.quantity)),
             'crop_type': txn.crop_type,
             'quality_grade': txn.quality_grade,
-            'moisture': float(txn.moisture),
-            'price': float(txn.price),
+            'moisture': Decimal(str(txn.moisture)),
+            'price': Decimal(str(txn.price)),
             'timestamp': txn.timestamp.isoformat(),
             'ledger_image_url': txn.ledger_image_url,
             'sync_status': str(txn.sync_status.value)
-        }
-        for txn in transactions
-    ])
+        })
+
+    # Create mock DynamoDB table
+    mock_table = Mock()
+
+    # Calculate what the current score will be using a temp engine
+    def temp_mock_query(**kwargs):
+        sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
+        if sk_prefix == 'TXN#':
+            return {'Items': txn_items}
+        return {'Items': []}
+
+    temp_mock_table = Mock()
+    temp_mock_table.query.side_effect = temp_mock_query
+    temp_mock_table.put_item = Mock()
+    temp_engine = CreditEngine(dynamodb_table=temp_mock_table)
     temp_engine._get_previous_score = Mock(return_value=None)
     temp_engine._store_score = Mock()
     temp_engine._notify_significant_change = Mock()
     temp_score = temp_engine.calculate_reliability_score(farmer.farmer_id)
     current_score = temp_score.total_score
-    
+
     # Set previous score to be small_delta different from current
     previous_score = max(0.0, min(100.0, current_score - small_delta))
-    
+
     # Mock query to return transactions and previous score
     def mock_query(**kwargs):
         pk = kwargs.get('ExpressionAttributeValues', {}).get(':pk')
         sk_prefix = kwargs.get('ExpressionAttributeValues', {}).get(':sk')
-        
+
         if sk_prefix == 'TXN#':
-            items = []
-            for txn in transactions:
-                items.append({
-                    'PK': txn.farmer_id,
-                    'SK': f"TXN#{txn.timestamp.isoformat()}",
-                    'transaction_id': txn.transaction_id,
-                    'farmer_id': txn.farmer_id,
-                    'fpo_id': txn.fpo_id,
-                    'quantity': Decimal(str(txn.quantity)),
-                    'crop_type': txn.crop_type,
-                    'quality_grade': txn.quality_grade,
-                    'moisture': Decimal(str(txn.moisture)),
-                    'price': Decimal(str(txn.price)),
-                    'timestamp': txn.timestamp.isoformat(),
-                    'ledger_image_url': txn.ledger_image_url,
-                    'sync_status': str(txn.sync_status.value)
-                })
-            return {'Items': items}
+            return {'Items': txn_items}
         elif sk_prefix == 'SCORE#':
             return {
                 'Items': [{
@@ -423,23 +409,23 @@ def test_property_16_insignificant_change_no_notification(farmer_and_txns, small
                     'total_score': Decimal(str(previous_score))
                 }]
             }
-        
+
         return {'Items': []}
-    
+
     mock_table.query = Mock(side_effect=mock_query)
     mock_table.put_item = Mock()
-    
+
     # Create CreditEngine
     credit_engine = CreditEngine(dynamodb_table=mock_table)
     credit_engine._notify_significant_change = Mock()
-    
+
     # Calculate reliability score
     score = credit_engine.calculate_reliability_score(farmer.farmer_id)
-    
+
     # Property 1: score_change should be <= 10 in absolute value
     assert abs(score.score_change) <= 10.0, \
         f"score_change should be <= 10 for insignificant change, got {score.score_change:.2f}"
-    
+
     # Property 2: Notification should NOT be triggered
     assert not credit_engine._notify_significant_change.called, \
         f"Notification should NOT be triggered for insignificant change of {score.score_change:.2f} points"

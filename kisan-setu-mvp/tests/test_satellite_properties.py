@@ -14,7 +14,7 @@ import math
 from hypothesis import given, strategies as st, settings, assume
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import sys
 import os
 
@@ -127,11 +127,24 @@ class TestSatelliteProperties:
     def _create_analyzer(self):
         """Create SatelliteAnalyzer with mocked clients."""
         mock_sagemaker = Mock()
+        mock_sagemaker.search_raster_data_collection.return_value = {
+            'Items': [{
+                'Id': 'S2_TEST_MOCK',
+                'DateTime': datetime.utcnow().isoformat() + 'Z',
+                'Properties': {'EoCloudCover': 10.0},
+                'Assets': {
+                    'red': {'Href': 's3://sentinel-cogs/B4.tif'},
+                    'nir': {'Href': 's3://sentinel-cogs/B8.tif'},
+                    'green': {'Href': 's3://sentinel-cogs/B3.tif'},
+                    'blue': {'Href': 's3://sentinel-cogs/B2.tif'},
+                }
+            }]
+        }
         mock_s3 = Mock()
         mock_table = Mock()
         mock_table.query.return_value = {'Items': []}  # Empty cache by default
         mock_table.put_item.return_value = {}
-        
+
         return SatelliteAnalyzer(
             sagemaker_client=mock_sagemaker,
             s3_client=mock_s3,
@@ -190,7 +203,7 @@ class TestSatelliteProperties:
     def test_property_8_ndvi_value_range_validity(self, satellite_image):
         """
         **Validates: Requirements 3.2**
-        
+
         Property 8: NDVI Value Range Validity
         For any satellite image with vegetation bands, the calculated NDVI value should be
         within the valid range of -1.0 to 1.0.
@@ -199,10 +212,14 @@ class TestSatelliteProperties:
         # Ensure required bands are present
         assert 'B4' in satellite_image.bands
         assert 'B8' in satellite_image.bands
-        
-        # Calculate NDVI
-        result = analyzer.calculate_ndvi(satellite_image)
-        
+
+        # Mock _compute_ndvi_from_cog to avoid real S3/rasterio calls
+        import random
+        mock_ndvi = random.uniform(-1.0, 1.0)
+        with patch.object(analyzer, '_compute_ndvi_from_cog', return_value=mock_ndvi):
+            # Calculate NDVI
+            result = analyzer.calculate_ndvi(satellite_image)
+
         # Verify NDVI is in valid range
         assert result is not None
         assert isinstance(result, NDVIResult)
@@ -216,16 +233,20 @@ class TestSatelliteProperties:
     def test_property_9_maturity_stage_classification(self, satellite_image):
         """
         **Validates: Requirements 3.3**
-        
+
         Property 9: Maturity Stage Classification
         For any NDVI calculation, the predicted crop maturity stage should be one of the
         valid stages: 'early', 'mid', 'late', or 'harvest_ready'.
         """
         analyzer = self._create_analyzer()
         valid_stages = ['early', 'mid', 'late', 'harvest_ready']
-        
-        # Calculate NDVI
-        ndvi_result = analyzer.calculate_ndvi(satellite_image)
+
+        # Mock _compute_ndvi_from_cog to avoid real S3/rasterio calls
+        import random
+        mock_ndvi = random.uniform(-1.0, 1.0)
+        with patch.object(analyzer, '_compute_ndvi_from_cog', return_value=mock_ndvi):
+            # Calculate NDVI
+            ndvi_result = analyzer.calculate_ndvi(satellite_image)
         
         # Create NDVI history with this result
         ndvi_history = [ndvi_result]
@@ -296,9 +317,22 @@ class TestSatelliteProperties:
         """
         # Create analyzer with mocked clients
         mock_sagemaker = Mock()
+        mock_sagemaker.search_raster_data_collection.return_value = {
+            'Items': [{
+                'Id': 'S2_CACHE_TEST',
+                'DateTime': datetime.utcnow().isoformat() + 'Z',
+                'Properties': {'EoCloudCover': 10.0},
+                'Assets': {
+                    'red': {'Href': 's3://sentinel-cogs/B4.tif'},
+                    'nir': {'Href': 's3://sentinel-cogs/B8.tif'},
+                    'green': {'Href': 's3://sentinel-cogs/B3.tif'},
+                    'blue': {'Href': 's3://sentinel-cogs/B2.tif'},
+                }
+            }]
+        }
         mock_s3 = Mock()
         mock_table = Mock()
-        
+
         analyzer = SatelliteAnalyzer(
             sagemaker_client=mock_sagemaker,
             s3_client=mock_s3,

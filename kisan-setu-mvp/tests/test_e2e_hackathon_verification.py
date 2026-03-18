@@ -100,17 +100,19 @@ class TestSatelliteMockNDVI:
         assert result["data_source"] == "mock"
 
     def test_out_of_bounds_coordinates_return_none(self):
-        """Coordinates outside Maharashtra should return None."""
+        """Coordinates outside India bounds should return None."""
         from satellite.satellite_mock import SatelliteMock
 
         mock = SatelliteMock()
 
-        # North of Maharashtra bounds
+        # North of India bounds (lat > 37.5)
         assert mock.get_ndvi_data(40.0, 75.0) is None
-        # West of Maharashtra bounds
+        # West of India bounds (lon < 68.0)
         assert mock.get_ndvi_data(19.0, 60.0) is None
-        # South of Maharashtra bounds
-        assert mock.get_ndvi_data(10.0, 75.0) is None
+        # Kerala (10.0, 75.0) is inside India — should return data
+        result = mock.get_ndvi_data(10.0, 75.0)
+        assert result is not None
+        assert "ndvi_value" in result
 
 
 # ---------------------------------------------------------------------------
@@ -122,52 +124,63 @@ class TestDashboardCDKTemplate:
 
     def test_cdk_template_has_dashboard_url_output(self):
         """Synthesized CDK template should contain a DashboardURL output."""
+        # CDK's jsii kernel resolves asset paths relative to cwd at process start.
+        # We must chdir BEFORE importing aws_cdk so the jsii Node process inherits
+        # the correct working directory.
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        prev_cwd = os.getcwd()
+        os.chdir(project_root)
         try:
-            import aws_cdk as cdk
-            from aws_cdk import assertions
-        except ImportError:
-            pytest.skip("aws_cdk not installed — run in CDK environment")
+            try:
+                import aws_cdk as cdk
+                from aws_cdk import assertions
+            except ImportError:
+                pytest.skip("aws_cdk not installed — run in CDK environment")
 
-        # Import stack relative to the project root
-        project_root = os.path.join(os.path.dirname(__file__), "..")
-        sys.path.insert(0, project_root)
-        from infrastructure_stack import KisanSetuMVPStack
+            sys.path.insert(0, project_root)
+            from infrastructure_stack import KisanSetuMVPStack
 
-        app = cdk.App()
-        stack = KisanSetuMVPStack(app, "TestStack")
-        template = assertions.Template.from_stack(stack)
-
-        template.has_output("DashboardURL", {"Value": assertions.Match.any_value()})
+            app = cdk.App()
+            stack = KisanSetuMVPStack(app, "TestStack")
+            template = assertions.Template.from_stack(stack)
+            template.has_output("DashboardURL", {"Value": assertions.Match.any_value()})
+        finally:
+            os.chdir(prev_cwd)
 
     def test_cdk_template_has_bedrock_converse_permission(self):
         """Synthesized CDK template IAM policy should include bedrock:Converse."""
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        prev_cwd = os.getcwd()
+        os.chdir(project_root)
         try:
-            import aws_cdk as cdk
-            from aws_cdk import assertions
-        except ImportError:
-            pytest.skip("aws_cdk not installed — run in CDK environment")
+            try:
+                import aws_cdk as cdk
+                from aws_cdk import assertions
+            except ImportError:
+                pytest.skip("aws_cdk not installed — run in CDK environment")
 
-        project_root = os.path.join(os.path.dirname(__file__), "..")
-        sys.path.insert(0, project_root)
-        from infrastructure_stack import KisanSetuMVPStack
+            sys.path.insert(0, project_root)
+            from infrastructure_stack import KisanSetuMVPStack
 
-        app = cdk.App()
-        stack = KisanSetuMVPStack(app, "TestStack")
-        template = assertions.Template.from_stack(stack)
+            app = cdk.App()
+            stack = KisanSetuMVPStack(app, "TestStack")
+            template = assertions.Template.from_stack(stack)
 
-        template.has_resource_properties(
-            "AWS::IAM::Policy",
-            assertions.Match.object_like({
-                "PolicyDocument": assertions.Match.object_like({
-                    "Statement": assertions.Match.array_with([
-                        assertions.Match.object_like({
-                            "Action": assertions.Match.array_with(["bedrock:Converse"]),
-                            "Effect": "Allow",
-                        })
-                    ])
-                })
-            }),
-        )
+            template.has_resource_properties(
+                "AWS::IAM::Policy",
+                assertions.Match.object_like({
+                    "PolicyDocument": assertions.Match.object_like({
+                        "Statement": assertions.Match.array_with([
+                            assertions.Match.object_like({
+                                "Action": assertions.Match.array_with(["bedrock:Converse"]),
+                                "Effect": "Allow",
+                            })
+                        ])
+                    })
+                }),
+            )
+        finally:
+            os.chdir(prev_cwd)
 
 
 # ---------------------------------------------------------------------------

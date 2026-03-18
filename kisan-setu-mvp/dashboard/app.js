@@ -1,45 +1,96 @@
 // Kisan-Setu Dashboard - Real-Time Updates
+
 // API Gateway endpoint
 const API_GATEWAY = 'https://061d3ls8qh.execute-api.ap-south-1.amazonaws.com/prod';
+
+// API Key — set this after deployment (API Gateway > API Keys in AWS Console)
+const API_KEY = '';
 
 // State
 let messages = [];
 let farmers = new Set();
 let creditScores = {};
 
-// Initialize dashboard
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch JSON from the API Gateway with the x-api-key header.
+ * Throws on non-2xx responses so callers can handle errors uniformly.
+ */
+async function apiFetch(path) {
+    const response = await fetch(`${API_GATEWAY}${path}`, {
+        headers: { 'x-api-key': API_KEY }
+    });
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
+    return response.json();
+}
+
+/**
+ * Wrapper around apiFetch that catches errors, shows an error banner via
+ * showError(), and retries after `retryDelay` ms (default 5 000).
+ * Returns the parsed JSON on success, or null on failure.
+ */
+async function fetchWithRetry(path, retryDelay = 5000) {
+    try {
+        return await apiFetch(path);
+    } catch (error) {
+        console.error(`Fetch failed for ${path}:`, error);
+        showError(`Failed to load data from ${path}`);
+        setTimeout(() => fetchWithRetry(path, retryDelay), retryDelay);
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initialise dashboard
+// ---------------------------------------------------------------------------
+
 document.addEventListener('DOMContentLoaded', () => {
     initSatelliteMap();
     initCreditChart();
     startLiveFeed();
-    loadInitialData();
 });
 
-// Initialize satellite map with NDVI data
+// ---------------------------------------------------------------------------
+// Satellite map — farmer locations + NDVI
+// ---------------------------------------------------------------------------
+
+let satelliteMap;
+
 function initSatelliteMap() {
-    const map = L.map('satellite-map').setView([19.7515, 75.7139], 10);
+    satelliteMap = L.map('satellite-map').setView([19.7515, 75.7139], 10);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap contributors'
-    }).addTo(map);
+    }).addTo(satelliteMap);
 
-    // Mock farmer locations with NDVI data
-    const mockFarmers = [
-        { name: 'राज पाटील', lat: 19.7515, lon: 75.7139, ndvi: 0.75, crop: 'Onion' },
-        { name: 'सुरेश देशमुख', lat: 19.8200, lon: 75.6500, ndvi: 0.82, crop: 'Wheat' },
-        { name: 'विजय जाधव', lat: 19.6800, lon: 75.8000, ndvi: 0.68, crop: 'Cotton' },
-        { name: 'अनिल कदम', lat: 19.7900, lon: 75.7800, ndvi: 0.55, crop: 'Soybean' },
-        { name: 'मनोज शिंदे', lat: 19.7100, lon: 75.6800, ndvi: 0.71, crop: 'Onion' }
-    ];
+    // Kick off the first data fetch
+    fetchFarmers();
+}
 
-    mockFarmers.forEach(farmer => {
+/**
+ * Fetch farmer/NDVI data from the API and render map markers.
+ * Falls back to a "no data" message when the API is unreachable or empty.
+ */
+async function fetchFarmers() {
+    const data = await fetchWithRetry('/credit');
+
+    if (!data || !Array.isArray(data.farmers) || data.farmers.length === 0) {
+        console.warn('No farmer data available from API');
+        showError('No live farmer data available — configure API endpoints');
+        return;
+    }
+
+    data.farmers.forEach(farmer => {
         const color = getNDVIColor(farmer.ndvi);
         const circle = L.circle([farmer.lat, farmer.lon], {
             color: color,
             fillColor: color,
             fillOpacity: 0.5,
             radius: 2000
-        }).addTo(map);
+        }).addTo(satelliteMap);
 
         circle.bindPopup(`
             <strong>${farmer.name}</strong><br>
@@ -64,22 +115,23 @@ function getHealthStatus(ndvi) {
     return 'Stressed 🔴';
 }
 
-// Initialize credit score chart
+// ---------------------------------------------------------------------------
+// Credit score chart
+// ---------------------------------------------------------------------------
+
 let creditChart;
+
 function initCreditChart() {
     const ctx = document.getElementById('credit-chart').getContext('2d');
 
-    // Mock credit score data
-    const dates = ['Week 1', 'Week 2', 'Week 3', 'Week 4', 'Week 5', 'Week 6'];
-    const scores = [620, 635, 645, 660, 675, 685];
-
+    // Create chart with empty data — filled once the API responds
     creditChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: dates,
+            labels: [],
             datasets: [{
                 label: 'Average Credit Score',
-                data: scores,
+                data: [],
                 borderColor: '#667eea',
                 backgroundColor: 'rgba(102, 126, 234, 0.1)',
                 borderWidth: 3,
@@ -93,116 +145,99 @@ function initCreditChart() {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: {
-                    display: true,
-                    position: 'top'
-                },
-                tooltip: {
-                    mode: 'index',
-                    intersect: false
-                }
+                legend: { display: true, position: 'top' },
+                tooltip: { mode: 'index', intersect: false }
             },
             scales: {
                 y: {
-                    beginAtZero: false,
-                    min: 550,
-                    max: 850,
-                    ticks: {
-                        callback: function(value) {
-                            return value;
-                        }
-                    },
-                    title: {
-                        display: true,
-                        text: 'Credit Score (550-850)'
-                    }
+                    beginAtZero: true,
+                    min: 0,
+                    max: 100,
+                    ticks: { callback: value => value },
+                    title: { display: true, text: 'Credit Score (0-100)' }
                 },
                 x: {
-                    title: {
-                        display: true,
-                        text: 'Time Period'
-                    }
+                    title: { display: true, text: 'Time Period' }
                 }
             }
         }
     });
+
+    // Kick off the first data fetch
+    fetchCreditScores();
 }
 
-// Start live message feed
+/**
+ * Fetch credit score history from the API and update the chart.
+ * Falls back to a "no data" message when the API is unreachable or empty.
+ */
+async function fetchCreditScores() {
+    const data = await fetchWithRetry('/credit');
+
+    if (!data || !Array.isArray(data.scores) || data.scores.length === 0) {
+        console.warn('No credit score data available from API');
+        return;
+    }
+
+    const dates = data.scores.map(s => s.date);
+    const scores = data.scores.map(s => s.score);
+
+    creditChart.data.labels = dates;
+    creditChart.data.datasets[0].data = scores;
+    creditChart.update();
+}
+
+// ---------------------------------------------------------------------------
+// Live message feed
+// ---------------------------------------------------------------------------
+
+// Start live message feed — polls every 5 seconds
 function startLiveFeed() {
-    // Update every 5 seconds
-    setInterval(fetchMessages, 5000);
     fetchMessages(); // Initial load
+    setInterval(fetchMessages, 5000);
 }
 
-// Fetch messages from DynamoDB via API Gateway
+/**
+ * Fetch recent messages from the API and render them in the feed.
+ * If the API is unreachable or returns no data, shows an informational message.
+ */
 async function fetchMessages() {
     try {
-        // In production, this would query DynamoDB
-        // For demo, show mock messages
-        const feed = document.getElementById('message-feed');
+        const data = await apiFetch('/messages');
 
-        if (messages.length === 0) {
-            // Show demo messages
-            addDemoMessages();
+        if (!data || !Array.isArray(data.messages) || data.messages.length === 0) {
+            if (messages.length === 0) {
+                showError('No live message data available — configure API endpoints');
+            }
+            updateStats();
+            return;
         }
 
-        // Update stats
+        const feed = document.getElementById('message-feed');
+
+        data.messages.forEach(msg => {
+            // Avoid duplicates based on sender + time
+            const isDuplicate = messages.some(
+                m => m.sender === msg.sender && m.time === msg.time && m.content === msg.content
+            );
+            if (!isDuplicate) {
+                messages.push(msg);
+                farmers.add(msg.sender);
+                renderMessage(msg);
+            }
+        });
+
         updateStats();
     } catch (error) {
         console.error('Error fetching messages:', error);
-        showError('Failed to load messages');
+        if (messages.length === 0) {
+            showError('No live message data available — configure API endpoints');
+        }
+        updateStats();
     }
 }
 
-// Add demo messages
-function addDemoMessages() {
-    const demoMessages = [
-        {
-            sender: '+919876543210',
-            name: 'राज पाटील',
-            type: 'text',
-            content: 'मेरा क्रेडिट स्कोर क्या है?',
-            language: 'hi',
-            time: new Date(Date.now() - 300000).toLocaleTimeString()
-        },
-        {
-            sender: '+919876543211',
-            name: 'सुरेश देशमुख',
-            type: 'image',
-            content: '📷 Uploaded ledger image for processing',
-            language: 'hi',
-            time: new Date(Date.now() - 600000).toLocaleTimeString()
-        },
-        {
-            sender: '+919876543212',
-            name: 'विजय जाधव',
-            type: 'voice',
-            content: '🎤 Voice message: मंडी मूल्य कितना है?',
-            language: 'mr',
-            time: new Date(Date.now() - 900000).toLocaleTimeString()
-        },
-        {
-            sender: '+919876543213',
-            name: 'System',
-            type: 'text',
-            content: 'Credit score calculated: 685/850 - Good standing',
-            language: 'en',
-            time: new Date(Date.now() - 120000).toLocaleTimeString()
-        }
-    ];
-
-    const feed = document.getElementById('message-feed');
-    feed.innerHTML = '';
-
-    demoMessages.forEach(msg => {
-        messages.push(msg);
-        farmers.add(msg.sender);
-        renderMessage(msg);
-    });
-}
-
-// Render single message
+// Render a single message into the feed
 function renderMessage(msg) {
     const feed = document.getElementById('message-feed');
 
@@ -237,7 +272,10 @@ function renderMessage(msg) {
     }
 }
 
-// Update statistics
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
 function updateStats() {
     document.getElementById('stat-messages').textContent = messages.length;
     document.getElementById('stat-farmers').textContent = farmers.size;
@@ -245,17 +283,14 @@ function updateStats() {
     document.getElementById('message-count').textContent = `${messages.length} messages`;
 }
 
-// Load initial data from DynamoDB
-async function loadInitialData() {
-    try {
-        // In production, would fetch from DynamoDB via API Gateway
-        console.log('Dashboard initialized with demo data');
-    } catch (error) {
-        console.error('Error loading initial data:', error);
-    }
-}
+// ---------------------------------------------------------------------------
+// Error / info UI
+// ---------------------------------------------------------------------------
 
-// Show error message
+/**
+ * Display an error or informational banner inside the message feed area.
+ * Used when API requests fail or return empty data.
+ */
 function showError(message) {
     const feed = document.getElementById('message-feed');
     feed.innerHTML = `
@@ -265,22 +300,3 @@ function showError(message) {
         </div>
     `;
 }
-
-// Simulate new message arrival (for demo purposes)
-setInterval(() => {
-    if (Math.random() > 0.7) {
-        const newMessage = {
-            sender: '+919876543' + Math.floor(Math.random() * 1000),
-            name: ['राज पाटील', 'सुरेश देशमुख', 'विजय जाधव'][Math.floor(Math.random() * 3)],
-            type: ['text', 'image', 'voice'][Math.floor(Math.random() * 3)],
-            content: 'New incoming message...',
-            language: ['hi', 'mr', 'en'][Math.floor(Math.random() * 3)],
-            time: new Date().toLocaleTimeString()
-        };
-
-        messages.push(newMessage);
-        farmers.add(newMessage.sender);
-        renderMessage(newMessage);
-        updateStats();
-    }
-}, 10000); // New message every 10 seconds (demo)

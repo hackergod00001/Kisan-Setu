@@ -314,8 +314,8 @@ class TestLanguageConsistentTranscription:
                 )
                 
                 # 2. Language options should include all supported languages
-                assert call_args.get('LanguageOptions') == agent.SUPPORTED_LANGUAGES, (
-                    f"LanguageOptions should be {agent.SUPPORTED_LANGUAGES}"
+                assert call_args.get('LanguageOptions') == agent.TRANSCRIBE_LANGUAGE_OPTIONS, (
+                    f"LanguageOptions should be {agent.TRANSCRIBE_LANGUAGE_OPTIONS}"
                 )
                 
                 # 3. Detected language must be one of the supported languages

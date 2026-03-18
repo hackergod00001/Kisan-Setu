@@ -1,0 +1,47 @@
+# Kisan Setu MVP — Consolidated Requirements
+# Install: pip install -r requirements.txt
+#
+# NOTE: Per-Lambda requirements.txt files exist in lambda/orchestrator/,
+# lambda/processor/, lambda/voice/, and layers/geospatial/ — those are
+# used by build_lambda_packages.sh for Lambda deployment packaging.
+# This file is the single source of truth for local development.
+
+# ── AWS CDK ──
+aws-cdk-lib==2.120.0
+constructs>=10.0.0,<11.0.0
+
+# ── AWS SDK ──
+boto3>=1.28.0
+
+# ── Runtime Dependencies (used by Lambda handlers) ──
+requests>=2.31.0
+cryptography>=41.0.0
+redis>=5.0.0
+
+# ── Geospatial (Lambda Layer — SatelliteAnalyzer) ──
+rasterio==1.3.10
+pyproj==3.6.1
+numpy==1.26.4
+Pillow==10.2.0
+
+# ── Testing ──
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-xdist>=3.3.0
+pytest-timeout>=2.1.0
+pytest-asyncio>=0.21.0
+hypothesis>=6.0.0
+moto>=4.2.0
+localstack-client>=2.0
+faker>=19.0.0
+freezegun>=1.2.0
+responses>=0.23.0
+
+# ── Code Quality ──
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+pylint>=2.17.0
+mypy>=1.4.0
+bandit>=1.7.5
+safety>=2.3.0

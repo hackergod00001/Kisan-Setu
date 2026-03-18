@@ -15,6 +15,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, timedelta
 import random
+from botocore.exceptions import ClientError
 
 REGION = 'ap-south-1'
 TABLE_NAME = 'KisanSetuData'
@@ -23,8 +24,23 @@ dynamodb = boto3.resource('dynamodb', region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
 
 
+def _put_item_idempotent(item):
+    """Put item only if PK doesn't already exist. Returns True if created, False if skipped."""
+    try:
+        table.put_item(
+            Item=item,
+            ConditionExpression='attribute_not_exists(PK)'
+        )
+        return True
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return False
+        raise
+
+
 def seed_fpo():
     """Seed FPO data."""
+    created, skipped = 0, 0
     fpo = {
         'PK': 'FPO#FPO001',
         'SK': 'METADATA',
@@ -36,13 +52,19 @@ def seed_fpo():
         'created_date': '2023-01-15',
         'member_count': 120,
     }
-    table.put_item(Item=fpo)
-    print(f"  Created FPO: {fpo['name']}")
-    return fpo
+    if _put_item_idempotent(fpo):
+        created += 1
+        print(f"  Created FPO: {fpo['name']}")
+    else:
+        skipped += 1
+        print(f"  Skipped FPO (already exists): {fpo['name']}")
+    print(f"  FPO: {created} created, {skipped} skipped")
+    return fpo, created, skipped
 
 
 def seed_farmers():
     """Seed farmer profiles."""
+    created, skipped = 0, 0
     # Use the real WhatsApp sandbox number from existing conversations
     farmers = [
         {
@@ -90,10 +112,15 @@ def seed_farmers():
     ]
 
     for farmer in farmers:
-        table.put_item(Item=farmer)
-        print(f"  Created Farmer: {farmer['name']} ({farmer['phone']})")
+        if _put_item_idempotent(farmer):
+            created += 1
+            print(f"  Created Farmer: {farmer['name']} ({farmer['phone']})")
+        else:
+            skipped += 1
+            print(f"  Skipped Farmer (already exists): {farmer['name']} ({farmer['phone']})")
 
-    return farmers
+    print(f"  Farmers: {created} created, {skipped} skipped")
+    return farmers, created, skipped
 
 
 def seed_transactions(farmers):
@@ -101,7 +128,7 @@ def seed_transactions(farmers):
     crop_types = ['onion', 'wheat', 'rice', 'cotton', 'soybean', 'grape', 'tomato']
     quality_grades = ['A', 'B', 'C']
 
-    count = 0
+    created, skipped = 0, 0
     for farmer in farmers:
         farmer_id = farmer['farmer_id']
         num_txns = random.randint(10, 15)
@@ -134,14 +161,18 @@ def seed_transactions(farmers):
                 'date': txn_date.strftime('%Y-%m-%d'),
                 'sync_status': 'SYNCED',
             }
-            table.put_item(Item=txn)
-            count += 1
+            if _put_item_idempotent(txn):
+                created += 1
+            else:
+                skipped += 1
 
-    print(f"  Created {count} transactions across {len(farmers)} farmers")
+    print(f"  Transactions: {created} created, {skipped} skipped across {len(farmers)} farmers")
+    return created, skipped
 
 
 def seed_credit_scores(farmers):
     """Seed credit scores for each farmer."""
+    created, skipped = 0, 0
     for farmer in farmers:
         farmer_id = farmer['farmer_id']
 
@@ -165,9 +196,13 @@ def seed_credit_scores(farmers):
                 'calculation_date': score_date,
                 'score_change': Decimal(str(round(random.uniform(-2, 8), 1))),
             }
-            table.put_item(Item=score_item)
+            if _put_item_idempotent(score_item):
+                created += 1
+            else:
+                skipped += 1
 
-    print(f"  Created credit scores for {len(farmers)} farmers (3 per farmer)")
+    print(f"  Credit Scores: {created} created, {skipped} skipped for {len(farmers)} farmers")
+    return created, skipped
 
 
 def seed_ndvi_data(farmers):
@@ -179,7 +214,7 @@ def seed_ndvi_data(farmers):
         ('HARVEST_READY', Decimal('0.85'), Decimal('0.96')),
     ]
 
-    count = 0
+    created, skipped = 0, 0
     for farmer in farmers:
         farmer_id = farmer['farmer_id']
         lat = farmer['gps_latitude']
@@ -205,39 +240,48 @@ def seed_ndvi_data(farmers):
                 'scan_date': scan_date,
                 'satellite_source': 'Sentinel-2',
             }
-            table.put_item(Item=ndvi_item)
-            count += 1
+            if _put_item_idempotent(ndvi_item):
+                created += 1
+            else:
+                skipped += 1
 
-    print(f"  Created {count} NDVI records for {len(farmers)} farmers")
+    print(f"  NDVI Data: {created} created, {skipped} skipped for {len(farmers)} farmers")
+    return created, skipped
 
 
 def main():
     print("Seeding KisanSetuData DynamoDB table...")
     print()
 
+    total_created, total_skipped = 0, 0
+
     print("[1/5] Seeding FPO...")
-    seed_fpo()
+    fpo, c, s = seed_fpo()
+    total_created += c
+    total_skipped += s
 
     print("[2/5] Seeding Farmers...")
-    farmers = seed_farmers()
+    farmers, c, s = seed_farmers()
+    total_created += c
+    total_skipped += s
 
     print("[3/5] Seeding Transactions...")
-    seed_transactions(farmers)
+    c, s = seed_transactions(farmers)
+    total_created += c
+    total_skipped += s
 
     print("[4/5] Seeding Credit Scores...")
-    seed_credit_scores(farmers)
+    c, s = seed_credit_scores(farmers)
+    total_created += c
+    total_skipped += s
 
     print("[5/5] Seeding NDVI Data...")
-    seed_ndvi_data(farmers)
+    c, s = seed_ndvi_data(farmers)
+    total_created += c
+    total_skipped += s
 
     print()
-    print("Seed complete! Verifying...")
-
-    # Count items
-    response = table.scan(Select='COUNT')
-    print(f"Total items in KisanSetuData: {response['Count']}")
-    print()
-    print("Done!")
+    print(f"Seed complete! Created: {total_created}, Skipped: {total_skipped}")
 
 
 if __name__ == '__main__':

@@ -7,6 +7,7 @@ from aws_cdk import (
     Stack,
     Duration,
     RemovalPolicy,
+    custom_resources as cr,
     aws_lambda as lambda_,
     aws_apigateway as apigw,
     aws_iam as iam,
@@ -16,10 +17,18 @@ from aws_cdk import (
     aws_appsync as appsync,
     aws_sns as sns,
     aws_sns_subscriptions as sns_subscriptions,
+    aws_kms as kms,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
+    aws_cloudfront as cloudfront,
+    aws_cloudfront_origins as origins,
+    aws_cognito as cognito,
     CfnOutput
 )
 from constructs import Construct
 import os
+
+STACK_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class KisanSetuMVPStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
@@ -29,9 +38,45 @@ class KisanSetuMVPStack(Stack):
         region = self.region
         
         # Reference existing DynamoDB table
+        #
+        # IMPORTANT — DynamoDB TTL Configuration:
+        # TTL must be enabled on the 'KisanSetuData' table for the 'ttl'
+        # attribute. This is required for automatic cleanup of old conversation
+        # items written by the Orchestrator Lambda (see orchestrator.py).
+        # Because the table is imported via from_table_name (not created by
+        # this stack), TTL must be enabled manually:
+        #
+        #   aws dynamodb update-time-to-live --table-name KisanSetuData \
+        #     --time-to-live-specification "Enabled=true, AttributeName=ttl"
+        #
+        # If the table were created by CDK instead, you would set:
+        #   time_to_live_attribute='ttl'
+        # in the dynamodb.Table() constructor.
         table = dynamodb.Table.from_table_name(
             self, "KisanSetuTable",
             table_name="KisanSetuData"
+        )
+        
+        # Enable Point-in-Time Recovery via AwsCustomResource
+        # (Table is imported via from_table_name, so PITR can't be set declaratively)
+        cr.AwsCustomResource(self, "EnablePITR",
+            on_create=cr.AwsSdkCall(
+                service="DynamoDB",
+                action="updateContinuousBackups",
+                parameters={
+                    "TableName": "KisanSetuData",
+                    "PointInTimeRecoverySpecification": {
+                        "PointInTimeRecoveryEnabled": True
+                    }
+                },
+                physical_resource_id=cr.PhysicalResourceId.of("KisanSetuData-PITR"),
+            ),
+            policy=cr.AwsCustomResourcePolicy.from_statements([
+                iam.PolicyStatement(
+                    actions=["dynamodb:UpdateContinuousBackups", "dynamodb:DescribeContinuousBackups"],
+                    resources=[f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData"]
+                )
+            ])
         )
         
         # Reference existing S3 buckets
@@ -57,109 +102,173 @@ class KisanSetuMVPStack(Stack):
             display_name="Kisan-Setu Critical Error Alerts"
         )
         
-        # Add email subscription (replace with actual admin email)
-        # alert_topic.add_subscription(
-        #     sns_subscriptions.EmailSubscription("admin@example.com")
-        # )
-        
-        # IAM role for Lambda functions
-        lambda_role = iam.Role(
-            self, "LambdaExecutionRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonTextractFullAccess"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonDynamoDBFullAccess"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonS3FullAccess"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonTranscribeFullAccess"
-                ),
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "AmazonPollyFullAccess"
-                )
-            ]
-        )
-        
-        # Add Bedrock permissions
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeAgent",
-                    "bedrock:Retrieve",
-                    "bedrock:RetrieveAndGenerate",
-                    "bedrock:Converse"
-                ],
-                resources=["*"]
+        # SNS email subscription via CDK context parameter
+        # Usage: cdk deploy -c alert_email=ops@example.com
+        alert_email = self.node.try_get_context('alert_email')
+        if alert_email:
+            alert_topic.add_subscription(
+                sns_subscriptions.EmailSubscription(alert_email)
             )
+        
+        # KMS Key for encrypting sensitive DynamoDB fields
+        encryption_key = kms.Key(
+            self, "SensitiveDataEncryptionKey",
+            alias="kisan-setu/sensitive-data",
+            description="KMS key for encrypting sensitive DynamoDB fields (phone, price, financial scores)",
+            enable_key_rotation=True,
+            removal_policy=RemovalPolicy.RETAIN
         )
         
-        # Add OpenSearch Serverless permissions for Knowledge Base
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "aoss:APIAccessAll"
-                ],
-                resources=["*"]
-            )
+        # --- Common policy statement builders ---
+        dynamodb_table_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData"
+        dynamodb_index_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData/index/*"
+
+        s3_bucket_arns = [
+            raw_bucket.bucket_arn,
+            processed_bucket.bucket_arn,
+            archive_bucket.bucket_arn,
+            f"{raw_bucket.bucket_arn}/*",
+            f"{processed_bucket.bucket_arn}/*",
+            f"{archive_bucket.bucket_arn}/*",
+        ]
+
+        s3_read_only_arns = [
+            raw_bucket.bucket_arn,
+            f"{raw_bucket.bucket_arn}/*",
+        ]
+
+        dynamodb_rw_policy = iam.PolicyStatement(
+            actions=[
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:BatchGetItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            resources=[dynamodb_table_arn, dynamodb_index_arn],
         )
-        
-        # Add SageMaker Geospatial permissions
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "sagemaker-geospatial:*",
-                    "sagemaker:InvokeEndpoint",
-                    "sagemaker:DescribeEndpoint"
-                ],
-                resources=["*"]
-            )
+
+        sns_policy = iam.PolicyStatement(
+            actions=["sns:Publish"],
+            resources=[alert_topic.topic_arn],
         )
-        
-        # Add Lambda invoke permissions (for router to call other Lambdas)
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["lambda:InvokeFunction"],
-                resources=[f"arn:aws:lambda:{region}:{account_id}:function:*"]
-            )
+
+        kms_policy = iam.PolicyStatement(
+            actions=["kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
+            resources=[encryption_key.key_arn],
         )
-        
-        # Add Secrets Manager permissions (for WhatsApp credentials)
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "secretsmanager:GetSecretValue",
-                    "secretsmanager:DescribeSecret"
-                ],
-                resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:kisan-setu/*"]
-            )
+
+        secrets_policy = iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
+            resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:kisan-setu/*"],
         )
-        
-        # Add SNS permissions for critical alerts
-        lambda_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "sns:Publish"
-                ],
-                resources=[alert_topic.topic_arn]
-            )
+
+        lambda_invoke_policy = iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[f"arn:aws:lambda:{region}:{account_id}:function:*"],
         )
+
+        s3_rw_policy = iam.PolicyStatement(
+            actions=[
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+            ],
+            resources=s3_bucket_arns,
+        )
+
+        s3_read_policy = iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:ListBucket"],
+            resources=s3_read_only_arns,
+        )
+
+        # --- Per-function IAM roles ---
+
+        # Router: DynamoDB R/W, S3 R/W, Lambda:Invoke, SecretsManager, SNS, KMS
+        router_role = self._create_lambda_role("Router", [
+            dynamodb_rw_policy, s3_rw_policy, lambda_invoke_policy,
+            secrets_policy, sns_policy, kms_policy,
+        ])
+
+        # Orchestrator: DynamoDB R/W, S3 R, Lambda:Invoke, Bedrock Invoke/Converse, SecretsManager, SNS, KMS
+        orchestrator_role = self._create_lambda_role("Orchestrator", [
+            dynamodb_rw_policy, s3_read_policy, lambda_invoke_policy,
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:Converse"],
+                resources=["*"],
+            ),
+            secrets_policy, sns_policy, kms_policy,
+        ])
+
+        # DocumentProcessor: DynamoDB R/W, S3 R/W, Textract, SecretsManager, SNS, KMS
+        processor_role = self._create_lambda_role("DocumentProcessor", [
+            dynamodb_rw_policy, s3_rw_policy,
+            iam.PolicyStatement(
+                actions=["textract:AnalyzeDocument", "textract:DetectDocumentText", "textract:StartDocumentAnalysis", "textract:GetDocumentAnalysis"],
+                resources=["*"],
+            ),
+            secrets_policy, sns_policy, kms_policy,
+        ])
+
+        # VoiceHandler: DynamoDB R/W, S3 R/W, Lambda:Invoke, Transcribe, Polly, SecretsManager, SNS, KMS
+        voice_role = self._create_lambda_role("VoiceHandler", [
+            dynamodb_rw_policy, s3_rw_policy, lambda_invoke_policy,
+            iam.PolicyStatement(
+                actions=["transcribe:StartTranscriptionJob", "transcribe:GetTranscriptionJob"],
+                resources=["*"],
+            ),
+            iam.PolicyStatement(
+                actions=["polly:SynthesizeSpeech"],
+                resources=["*"],
+            ),
+            secrets_policy, sns_policy, kms_policy,
+        ])
+
+        # CreditCalculator: DynamoDB R/W, SNS, KMS
+        credit_role = self._create_lambda_role("CreditCalculator", [
+            dynamodb_rw_policy, sns_policy, kms_policy,
+        ])
+
+        # SatelliteAnalyzer: DynamoDB R/W, S3 R/W, SageMaker Geospatial, SNS, KMS
+        satellite_role = self._create_lambda_role("SatelliteAnalyzer", [
+            dynamodb_rw_policy, s3_rw_policy,
+            iam.PolicyStatement(
+                actions=["sagemaker-geospatial:*", "sagemaker:InvokeEndpoint", "sagemaker:DescribeEndpoint"],
+                resources=["*"],
+            ),
+            sns_policy, kms_policy,
+        ])
+
+        # KnowledgeBase: DynamoDB R/W, Bedrock Retrieve/Invoke, OpenSearch Serverless, SNS, KMS
+        knowledge_role = self._create_lambda_role("KnowledgeBase", [
+            dynamodb_rw_policy,
+            iam.PolicyStatement(
+                actions=["bedrock:Retrieve", "bedrock:RetrieveAndGenerate", "bedrock:InvokeModel"],
+                resources=["*"],
+            ),
+            iam.PolicyStatement(
+                actions=["aoss:APIAccessAll"],
+                resources=["*"],
+            ),
+            sns_policy, kms_policy,
+        ])
+
+        # SyncHandler: DynamoDB R/W, SNS, KMS
+        sync_role = self._create_lambda_role("SyncHandler", [
+            dynamodb_rw_policy, sns_policy, kms_policy,
+        ])
         
         # Document Processor Lambda (create first so we can reference it)
         processor_lambda = lambda_.Function(
             self, "DocumentProcessor",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="processor.handler",
-            code=lambda_.Code.from_asset("lambda/processor"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/processor")),
+            role=processor_role,
             timeout=Duration.seconds(60),
             memory_size=1024,
             environment={
@@ -169,7 +278,8 @@ class KisanSetuMVPStack(Stack):
                 "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "KMS_KEY_ID": encryption_key.key_id
             }
         )
 
@@ -178,8 +288,8 @@ class KisanSetuMVPStack(Stack):
             self, "VoiceHandler",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="voice.handler",
-            code=lambda_.Code.from_asset("lambda/voice"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/voice")),
+            role=voice_role,
             timeout=Duration.seconds(60),
             memory_size=512,
             environment={
@@ -189,7 +299,8 @@ class KisanSetuMVPStack(Stack):
                 "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "KMS_KEY_ID": encryption_key.key_id
             }
         )
 
@@ -198,15 +309,24 @@ class KisanSetuMVPStack(Stack):
             self, "CreditCalculator",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="credit.handler",
-            code=lambda_.Code.from_asset("lambda/credit"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/credit")),
+            role=credit_role,
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
                 "DYNAMODB_TABLE": "KisanSetuData",
                 "REGION": region,
-                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "KMS_KEY_ID": encryption_key.key_id
             }
+        )
+
+        # Geospatial Lambda Layer (rasterio, pyproj, numpy for real NDVI)
+        geospatial_layer = lambda_.LayerVersion(
+            self, "GeospatialLayer",
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "layers/geospatial")),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_11],
+            description="rasterio + pyproj + numpy for Sentinel-2 NDVI computation",
         )
 
         # Satellite Analyzer Lambda
@@ -214,15 +334,20 @@ class KisanSetuMVPStack(Stack):
             self, "SatelliteAnalyzer",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="satellite_analyzer.handler",
-            code=lambda_.Code.from_asset("lambda/satellite"),
-            role=lambda_role,
-            timeout=Duration.seconds(60),
-            memory_size=1024,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/satellite")),
+            role=satellite_role,
+            timeout=Duration.seconds(120),
+            memory_size=2048,
+            layers=[geospatial_layer],
             environment={
                 "DYNAMODB_TABLE": "KisanSetuData",
                 "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
+                "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
                 "REGION": region,
-                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
+                "SAGEMAKER_REGION": "us-west-2",
+                "SENTINEL2_ARN": "arn:aws:sagemaker-geospatial:us-west-2:378778860802:raster-data-collection/public/nmqj48dcu3g7ayw8",
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "KMS_KEY_ID": encryption_key.key_id
             }
         )
         
@@ -231,39 +356,49 @@ class KisanSetuMVPStack(Stack):
             self, "KnowledgeBase",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="knowledge_base.handler",
-            code=lambda_.Code.from_asset("lambda/knowledge"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/knowledge")),
+            role=knowledge_role,
             timeout=Duration.seconds(60),
             memory_size=512,
             environment={
                 "REGION": region,
-                "KNOWLEDGE_BASE_ID": ""  # Will be set after running setup_knowledge_base.py
+                "KNOWLEDGE_BASE_ID": "",  # REQUIRED: Set after running setup_knowledge_base.py — Lambda will fail-fast without this
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "KMS_KEY_ID": encryption_key.key_id,
+                "DYNAMODB_TABLE": "KisanSetuData"
             }
         )
         
-        # Bedrock Orchestrator Lambda
+        # Bedrock Orchestrator Lambda — explicit function_name to break circular dependency with VoiceHandler
+        orchestrator_function_name = "KisanSetu-BedrockOrchestrator"
         orchestrator_lambda = lambda_.Function(
             self, "BedrockOrchestrator",
+            function_name=orchestrator_function_name,
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="orchestrator.handler",
-            code=lambda_.Code.from_asset("lambda/orchestrator"),
-            role=lambda_role,
-            timeout=Duration.seconds(60),
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/orchestrator")),
+            role=orchestrator_role,
+            timeout=Duration.seconds(180),
             memory_size=1024,
             environment={
                 "DYNAMODB_TABLE": "KisanSetuData",
                 "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
                 "REGION": region,
-                "BEDROCK_AGENT_ID": "UUQPVM0ULJ",
-                "BEDROCK_AGENT_ALIAS_ID": "A2TGFPMFXZ",
                 "DOCUMENT_PROCESSOR_FUNCTION": processor_lambda.function_name,
                 "VOICE_AGENT_FUNCTION": voice_lambda.function_name,
                 "SATELLITE_ANALYZER_FUNCTION": satellite_lambda.function_name,
                 "CREDIT_CALCULATOR_FUNCTION": credit_lambda.function_name,
                 "KNOWLEDGE_BASE_FUNCTION": knowledge_lambda.function_name,
-                "KNOWLEDGE_BASE_ID": "",  # Will be set after running setup_knowledge_base.py
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials"
+                "KNOWLEDGE_BASE_ID": "",  # REQUIRED: Set after running setup_knowledge_base.py
+                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "KMS_KEY_ID": encryption_key.key_id
             }
+        )
+
+        # Add BEDROCK_ORCHESTRATOR_FUNCTION to VoiceHandler using string to avoid circular dependency
+        voice_lambda.add_environment(
+            "BEDROCK_ORCHESTRATOR_FUNCTION", orchestrator_function_name
         )
 
         # Message Router Lambda
@@ -271,8 +406,8 @@ class KisanSetuMVPStack(Stack):
             self, "MessageRouter",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="router.handler",
-            code=lambda_.Code.from_asset("lambda/router"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/router")),
+            role=router_role,
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
@@ -286,10 +421,24 @@ class KisanSetuMVPStack(Stack):
                 "PROCESSOR_FUNCTION_NAME": processor_lambda.function_name,
                 "VOICE_AGENT_FUNCTION": voice_lambda.function_name,
                 "BEDROCK_ORCHESTRATOR_FUNCTION": orchestrator_lambda.function_name,
-                "CREDIT_CALCULATOR_FUNCTION": credit_lambda.function_name,
-                "SATELLITE_ANALYZER_FUNCTION": satellite_lambda.function_name,
-                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "KMS_KEY_ID": encryption_key.key_id
             }
+        )
+
+        # Provisioned concurrency for Router and Orchestrator
+        router_version = router_lambda.current_version
+        router_alias = lambda_.Alias(self, "RouterAlias",
+            alias_name="live",
+            version=router_version,
+            provisioned_concurrent_executions=2,
+        )
+
+        orchestrator_version = orchestrator_lambda.current_version
+        orchestrator_alias = lambda_.Alias(self, "OrchestratorAlias",
+            alias_name="live",
+            version=orchestrator_version,
+            provisioned_concurrent_executions=2,
         )
 
         # API Gateway
@@ -308,35 +457,77 @@ class KisanSetuMVPStack(Stack):
         webhook = api.root.add_resource("webhook")
         webhook.add_method(
             "POST",
-            apigw.LambdaIntegration(router_lambda)
+            apigw.LambdaIntegration(router_alias)
         )
         # GET method for webhook verification (Meta WhatsApp)
         webhook.add_method(
             "GET",
-            apigw.LambdaIntegration(router_lambda)
+            apigw.LambdaIntegration(router_alias)
         )
         
         # /process endpoint for document processing
         process = api.root.add_resource("process")
         process.add_method(
             "POST",
-            apigw.LambdaIntegration(processor_lambda)
+            apigw.LambdaIntegration(processor_lambda),
+            api_key_required=True
         )
         
         # /credit endpoint for credit score calculation
         credit = api.root.add_resource("credit")
         credit.add_method(
             "POST",
-            apigw.LambdaIntegration(credit_lambda)
+            apigw.LambdaIntegration(credit_lambda),
+            api_key_required=True
         )
         
         # /knowledge endpoint for knowledge base queries
         knowledge = api.root.add_resource("knowledge")
         knowledge.add_method(
             "POST",
-            apigw.LambdaIntegration(knowledge_lambda)
+            apigw.LambdaIntegration(knowledge_lambda),
+            api_key_required=True
         )
-        
+
+        # API Key for authenticated endpoints (/process, /credit, /knowledge)
+        api_key = api.add_api_key(
+            "KisanSetuApiKey",
+            api_key_name="kisan-setu-api-key",
+            description="API key for Kisan-Setu authenticated endpoints"
+        )
+
+        # Usage plan to associate the API key with the API stage
+        usage_plan = api.add_usage_plan(
+            "KisanSetuUsagePlan",
+            name="kisan-setu-usage-plan",
+            description="Usage plan for Kisan-Setu API",
+            throttle=apigw.ThrottleSettings(
+                rate_limit=100,
+                burst_limit=200
+            )
+        )
+        usage_plan.add_api_stage(stage=api.deployment_stage)
+        usage_plan.add_api_key(api_key)
+
+        # Cognito User Pool for AppSync authentication
+        user_pool = cognito.UserPool(
+            self, "KisanSetuUserPool",
+            user_pool_name="kisan-setu-user-pool",
+            self_sign_up_enabled=False,
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            removal_policy=RemovalPolicy.DESTROY
+        )
+
+        # Cognito User Pool Client for AppSync
+        user_pool_client = user_pool.add_client(
+            "KisanSetuUserPoolClient",
+            user_pool_client_name="kisan-setu-appsync-client",
+            auth_flows=cognito.AuthFlow(
+                user_password=True,
+                user_srp=True
+            )
+        )
+
         # AppSync GraphQL API for offline sync
         graphql_api = appsync.GraphqlApi(
             self, "KisanSetuGraphQLAPI",
@@ -346,7 +537,10 @@ class KisanSetuMVPStack(Stack):
             ),
             authorization_config=appsync.AuthorizationConfig(
                 default_authorization=appsync.AuthorizationMode(
-                    authorization_type=appsync.AuthorizationType.API_KEY
+                    authorization_type=appsync.AuthorizationType.USER_POOL,
+                    user_pool_config=appsync.UserPoolConfig(
+                        user_pool=user_pool
+                    )
                 )
             ),
             xray_enabled=True
@@ -530,13 +724,18 @@ $util.toJson($ctx.result)
             self, "SyncHandler",
             runtime=lambda_.Runtime.PYTHON_3_11,
             handler="sync_handler.handler",
-            code=lambda_.Code.from_asset("lambda/sync"),
-            role=lambda_role,
+            code=lambda_.Code.from_asset(
+                "lambda/sync",
+                exclude=["__pycache__"]
+            ),
+            role=sync_role,
             timeout=Duration.seconds(60),
             memory_size=512,
             environment={
                 "DYNAMODB_TABLE": "KisanSetuData",
-                "REGION": region
+                "REGION": region,
+                "KMS_KEY_ID": encryption_key.key_id,
+                "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
             }
         )
         
@@ -594,34 +793,97 @@ $util.toJson($ctx.result)
             """)
         )
         
-        # Dashboard S3 bucket with static website hosting
+        # ── CloudWatch Alarms ──────────────────────────────────────────
+        # 8 Lambda functions × 2 alarms (Errors + Throttles) + 2 API Gateway alarms = 18 total
+        lambda_functions = {
+            "Router": router_lambda,
+            "Orchestrator": orchestrator_lambda,
+            "DocumentProcessor": processor_lambda,
+            "VoiceHandler": voice_lambda,
+            "CreditCalculator": credit_lambda,
+            "SatelliteAnalyzer": satellite_lambda,
+            "KnowledgeBase": knowledge_lambda,
+            "SyncHandler": sync_lambda,
+        }
+
+        for name, fn in lambda_functions.items():
+            cloudwatch.Alarm(self, f"{name}ErrorAlarm",
+                metric=fn.metric_errors(period=Duration.minutes(5)),
+                threshold=0,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                evaluation_periods=1,
+                alarm_name=f"kisan-setu-{name}-errors",
+            ).add_alarm_action(cw_actions.SnsAction(alert_topic))
+
+            cloudwatch.Alarm(self, f"{name}ThrottleAlarm",
+                metric=fn.metric_throttles(period=Duration.minutes(5)),
+                threshold=0,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                evaluation_periods=1,
+                alarm_name=f"kisan-setu-{name}-throttles",
+            ).add_alarm_action(cw_actions.SnsAction(alert_topic))
+
+        # API Gateway 5xx alarm
+        cloudwatch.Alarm(self, "ApiGateway5xxAlarm",
+            metric=api.metric_server_error(period=Duration.minutes(5)),
+            threshold=0,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluation_periods=1,
+            alarm_name="kisan-setu-api-5xx",
+        ).add_alarm_action(cw_actions.SnsAction(alert_topic))
+
+        # API Gateway p99 latency alarm
+        cloudwatch.Alarm(self, "ApiGatewayLatencyAlarm",
+            metric=api.metric_latency(period=Duration.minutes(5), statistic="p99"),
+            threshold=10000,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluation_periods=1,
+            alarm_name="kisan-setu-api-latency-p99",
+        ).add_alarm_action(cw_actions.SnsAction(alert_topic))
+
+        # Dashboard S3 bucket (private, served via CloudFront)
         dashboard_bucket = s3.Bucket(
             self, "DashboardBucket",
             bucket_name=f"kisan-setu-dashboard-{account_id}",
-            website_index_document="index.html",
-            public_read_access=True,
-            block_public_access=s3.BlockPublicAccess(
-                block_public_acls=False,
-                block_public_policy=False,
-                ignore_public_acls=False,
-                restrict_public_buckets=False
-            ),
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True
+        )
+
+        # CloudFront Origin Access Identity for dashboard bucket
+        dashboard_oai = cloudfront.OriginAccessIdentity(
+            self, "DashboardOAI",
+            comment="OAI for Kisan-Setu dashboard bucket"
+        )
+        dashboard_bucket.grant_read(dashboard_oai)
+
+        # CloudFront distribution for dashboard
+        dashboard_distribution = cloudfront.Distribution(
+            self, "DashboardDistribution",
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.S3Origin(
+                    dashboard_bucket,
+                    origin_access_identity=dashboard_oai
+                ),
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS
+            ),
+            default_root_object="index.html"
         )
 
         # Upload dashboard files
         s3_deployment.BucketDeployment(
             self, "DashboardDeployment",
             sources=[s3_deployment.Source.asset("dashboard")],
-            destination_bucket=dashboard_bucket
+            destination_bucket=dashboard_bucket,
+            distribution=dashboard_distribution,
+            distribution_paths=["/*"]
         )
 
-        # Dashboard URL output
+        # Dashboard URL output (now via CloudFront)
         CfnOutput(
             self, "DashboardURL",
-            value=dashboard_bucket.bucket_website_url,
-            description="Dashboard website URL"
+            value=f"https://{dashboard_distribution.distribution_domain_name}",
+            description="Dashboard website URL (CloudFront)"
         )
 
         # Outputs
@@ -635,6 +897,12 @@ $util.toJson($ctx.result)
             self, "WebhookURL",
             value=f"{api.url}webhook",
             description="WhatsApp webhook URL"
+        )
+
+        CfnOutput(
+            self, "APIKeyId",
+            value=api_key.key_id,
+            description="API Key ID for authenticated endpoints"
         )
         
         CfnOutput(
@@ -669,14 +937,26 @@ $util.toJson($ctx.result)
         
         CfnOutput(
             self, "GraphQLAPIKey",
-            value=graphql_api.api_key or "N/A",
-            description="AppSync API Key"
+            value="N/A (Cognito User Pools auth)",
+            description="AppSync auth switched to Cognito User Pools"
         )
         
         CfnOutput(
             self, "GraphQLAPIID",
             value=graphql_api.api_id,
             description="AppSync API ID"
+        )
+
+        CfnOutput(
+            self, "CognitoUserPoolId",
+            value=user_pool.user_pool_id,
+            description="Cognito User Pool ID for AppSync auth"
+        )
+
+        CfnOutput(
+            self, "CognitoUserPoolClientId",
+            value=user_pool_client.user_pool_client_id,
+            description="Cognito User Pool Client ID for AppSync auth"
         )
 
         # Outputs
@@ -686,3 +966,18 @@ $util.toJson($ctx.result)
             description="SNS Topic ARN for critical error alerts",
             export_name="KisanSetuAlertTopicArn"
         )
+
+    def _create_lambda_role(self, name, extra_policies=None):
+        """Create a Lambda execution role with basic execution policy plus extra policy statements."""
+        role = iam.Role(
+            self, f"{name}Role",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                )
+            ],
+        )
+        for policy in (extra_policies or []):
+            role.add_to_policy(policy)
+        return role

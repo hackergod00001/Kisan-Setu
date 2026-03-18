@@ -2,147 +2,91 @@
 
 ## Overview
 
-The Satellite Analyzer Component retrieves satellite imagery and calculates NDVI (Normalized Difference Vegetation Index) for crop yield prediction. It integrates with AWS SageMaker Geospatial for Sentinel-2 satellite imagery retrieval and implements intelligent caching to optimize costs.
-
-## Features
-
-- **Satellite Imagery Retrieval**: Fetches Sentinel-2 imagery for GPS coordinates using SageMaker Geospatial
-- **NDVI Calculation**: Computes vegetation health index using band math (B8 - B4) / (B8 + B4)
-- **Crop Maturity Classification**: Determines crop stage (early, mid, late, harvest_ready) based on NDVI trends
-- **Yield Prediction**: Estimates crop yield volume based on NDVI history and crop type
-- **Cloud Cover Handling**: Adjusts confidence scores based on cloud cover percentage
-- **24-Hour Caching**: Reduces API costs by caching satellite imagery for 24 hours
+The Satellite Analyzer retrieves satellite imagery and calculates NDVI (Normalized Difference Vegetation Index) for crop yield prediction. It integrates with AWS SageMaker Geospatial for Sentinel-2 satellite imagery and implements 24-hour DynamoDB caching. It also renders NDVI heatmaps as PNG images using PIL.
 
 ## Architecture
 
-### Components
+```mermaid
+graph TB
+    subgraph Input["Invocation"]
+        ORCH["BedrockOrchestrator<br/>(sync Lambda invoke)"]
+    end
 
-1. **SatelliteAnalyzer Class**: Main class implementing all satellite analysis functionality
-2. **Data Models**:
-   - `SatelliteImage`: Satellite imagery with bands and metadata
-   - `NDVIResult`: NDVI calculation result with confidence score
-   - `YieldPrediction`: Crop yield prediction with confidence interval
+    subgraph SatAnalyzer["SatelliteAnalyzer (2048 MB · 120s)"]
+        HANDLER["handler()"]
+        CACHE_CHECK["Check DynamoDB cache<br/>(24h TTL)"]
+        LIVE["Live Mode<br/>(SageMaker Geospatial)"]
+        MOCK["Mock Mode<br/>(SatelliteMock)"]
+        NDVI_CALC["NDVI Calculation<br/>(NIR - Red) / (NIR + Red)"]
+        HEATMAP["NDVI Heatmap Rendering<br/>(PIL → PNG)"]
+        YIELD["Yield Prediction<br/>(maturity stage + confidence)"]
+    end
 
-### AWS Services Used
+    subgraph External["External Services"]
+        SAGEMAKER["SageMaker Geospatial<br/>(us-west-2)<br/>Sentinel-2 imagery"]
+        S3["S3 (raw/processed)"]
+    end
 
-- **SageMaker Geospatial**: Sentinel-2 satellite imagery retrieval
-- **DynamoDB**: Caching satellite imagery and storing NDVI results
-- **S3**: Storing satellite imagery bands
+    subgraph Storage["Storage"]
+        DDB["DynamoDB<br/>FIELD#hash → NDVI#ts"]
+    end
 
-## Usage
-
-### Lambda Handler
-
-The component exposes a Lambda handler that accepts three actions:
-
-#### 1. Get Satellite Imagery
-
-```python
-event = {
-    'action': 'get_imagery',
-    'gps_coords': [19.0760, 72.8777],  # [latitude, longitude]
-    'date_range': ['2024-01-01', '2024-01-07']  # Optional
-}
+    ORCH --> HANDLER
+    HANDLER --> CACHE_CHECK
+    CACHE_CHECK -->|"cache miss"| LIVE
+    CACHE_CHECK -->|"cache miss (no SageMaker)"| MOCK
+    CACHE_CHECK -->|"cache hit"| YIELD
+    LIVE --> SAGEMAKER
+    SAGEMAKER --> NDVI_CALC
+    MOCK --> NDVI_CALC
+    NDVI_CALC --> HEATMAP
+    NDVI_CALC --> DDB
+    NDVI_CALC --> YIELD
+    HEATMAP --> S3
 ```
 
-#### 2. Calculate NDVI
+## Lambda Configuration
 
-```python
-event = {
-    'action': 'calculate_ndvi',
-    'gps_coords': [19.0760, 72.8777]
-}
-```
+| Property | Value |
+|----------|-------|
+| Runtime | Python 3.11 |
+| Memory | **2048 MB** |
+| Timeout | **120s** |
+| Handler | `satellite_analyzer.handler` |
+| Layers | GeospatialLayer (rasterio, pyproj, numpy) |
 
-#### 3. Predict Yield
+## Features
 
-```python
-event = {
-    'action': 'predict_yield',
-    'gps_coords': [19.0760, 72.8777],
-    'crop_type': 'onion'  # onion, wheat, rice, cotton, tomato, potato
-}
-```
+- **Satellite Imagery Retrieval**: Fetches Sentinel-2 imagery via SageMaker Geospatial (region: `us-west-2`)
+- **NDVI Calculation**: `(B8 - B4) / (B8 + B4)` where B8=NIR, B4=Red
+- **NDVI Heatmap Rendering**: PIL-based PNG generation of NDVI spatial data
+- **Crop Maturity Classification**: Early, Mid, Late, Harvest Ready based on NDVI trends
+- **Yield Prediction**: Estimates crop yield volume based on NDVI history and crop type
+- **Cloud Cover Handling**: Adjusts confidence scores based on cloud cover percentage
+- **24-Hour Caching**: DynamoDB-backed cache (`FIELD#{coords_hash}` / `NDVI#{timestamp}`)
+- **Mock Mode**: `SatelliteMock` provides deterministic NDVI for demo (Maharashtra bounds, 8 crop types)
 
-### Direct Class Usage
+## NDVI Value Interpretation
 
-```python
-from satellite_analyzer import SatelliteAnalyzer
-from datetime import date, timedelta
-
-# Initialize analyzer
-analyzer = SatelliteAnalyzer()
-
-# Get satellite imagery
-gps_coords = (19.0760, 72.8777)  # Mumbai, India
-end_date = date.today()
-start_date = end_date - timedelta(days=7)
-
-satellite_image = analyzer.get_satellite_imagery(
-    gps_coords=gps_coords,
-    date_range=(start_date, end_date)
-)
-
-# Calculate NDVI
-ndvi_result = analyzer.calculate_ndvi(satellite_image)
-print(f"NDVI: {ndvi_result.ndvi_value:.3f}")
-print(f"Confidence: {ndvi_result.confidence:.2f}")
-
-# Predict yield
-field_id = analyzer._generate_field_id(gps_coords)
-ndvi_history = analyzer._get_ndvi_history(field_id, days=30)
-
-yield_prediction = analyzer.predict_yield(ndvi_history, crop_type='onion')
-print(f"Estimated yield: {yield_prediction.estimated_volume:.2f} tons/hectare")
-print(f"Maturity stage: {yield_prediction.maturity_stage}")
-print(f"Confidence interval: [{yield_prediction.confidence_interval[0]:.2f}, {yield_prediction.confidence_interval[1]:.2f}]")
-```
-
-## NDVI Calculation
-
-NDVI (Normalized Difference Vegetation Index) measures vegetation health:
-
-```
-NDVI = (NIR - Red) / (NIR + Red)
-```
-
-For Sentinel-2 imagery:
-```
-NDVI = (B8 - B4) / (B8 + B4)
-```
-
-Where:
-- **B8**: Near-Infrared (NIR) band
-- **B4**: Red band
-
-### NDVI Value Interpretation
-
-- **-1.0 to 0.0**: Water, bare soil, non-vegetated areas
-- **0.0 to 0.3**: Sparse vegetation, stressed crops
-- **0.3 to 0.6**: Moderate vegetation, growing crops
-- **0.6 to 0.8**: Dense vegetation, healthy mature crops
-- **0.8 to 1.0**: Very dense vegetation
+| NDVI Range | Meaning |
+|------------|---------|
+| -1.0 to 0.0 | Water, bare soil, non-vegetated |
+| 0.0 to 0.3 | Sparse vegetation, stressed crops |
+| 0.3 to 0.6 | Moderate vegetation, growing crops |
+| 0.6 to 0.8 | Dense vegetation, healthy mature crops |
+| 0.8 to 1.0 | Very dense vegetation |
 
 ## Maturity Stage Classification
 
-The system classifies crop maturity based on NDVI values and trends:
+```mermaid
+flowchart LR
+    NDVI["NDVI Value + Trend"] --> EARLY["Early<br/>NDVI < 0.4, increasing"]
+    NDVI --> MID["Mid<br/>NDVI 0.4-0.6, stable"]
+    NDVI --> LATE["Late<br/>NDVI 0.6-0.8, stable/declining"]
+    NDVI --> HARVEST["Harvest Ready<br/>NDVI < 0.3 or declining rapidly"]
+```
 
-| Stage | NDVI Range | Trend | Description |
-|-------|------------|-------|-------------|
-| **early** | < 0.4 | Increasing | Early growth phase |
-| **mid** | 0.4 - 0.6 | Stable | Mid-growth phase |
-| **late** | 0.6 - 0.8 | Stable/Declining | Late growth, approaching maturity |
-| **harvest_ready** | < 0.3 or declining rapidly | Declining | Ready for harvest |
-
-## Yield Prediction
-
-Yield prediction is based on:
-
-1. **Average NDVI**: Higher NDVI indicates healthier crops and higher yield
-2. **Crop Type**: Different crops have different base yield factors
-3. **NDVI Trends**: Consistent high NDVI indicates better yield potential
-
-### Crop Yield Factors (tons/hectare)
+## Crop Yield Factors (tons/hectare)
 
 | Crop | Base Yield |
 |------|------------|
@@ -155,157 +99,29 @@ Yield prediction is based on:
 
 Actual yield = Base Yield × NDVI Factor (0.3 to 1.0)
 
-## Caching Strategy
+## Environment Variables
 
-To optimize costs (Requirement 9.5), the component implements 24-hour caching:
+| Variable | Purpose |
+|----------|---------|
+| `DYNAMODB_TABLE` | DynamoDB table name |
+| `S3_BUCKET_RAW` | Raw data bucket |
+| `S3_BUCKET_PROCESSED` | Processed data bucket |
+| `REGION` | Primary region (`ap-south-1`) |
+| `SAGEMAKER_REGION` | SageMaker Geospatial region (`us-west-2`) |
+| `SENTINEL2_ARN` | Sentinel-2 raster data collection ARN |
+| `SNS_ALERT_TOPIC_ARN` | Critical alerts topic |
 
-1. **Cache Key**: Field ID (hash of GPS coordinates) + timestamp
-2. **Cache TTL**: 24 hours
-3. **Cache Storage**: DynamoDB with PK=FIELD#{id}, SK=SATELLITE#{timestamp}
-4. **Cache Invalidation**: Automatic after 24 hours
+## Actions
 
-### Cost Savings
-
-- Without caching: ~$0.10 per imagery request
-- With 24-hour caching: ~$0.10 per field per day
-- For 100 fields checked daily: $10/day → $0.10/day (99% savings)
-
-## Error Handling
-
-### GPS Validation
-
-- Latitude must be between -90 and 90
-- Longitude must be between -180 and 180
-- Invalid coordinates raise `ValueError`
-
-### Data Unavailability
-
-When satellite data is unavailable:
-- Clear error message returned
-- Reason included (cloud cover, no recent imagery, etc.)
-- Cached data used if available
-
-### Cloud Cover
-
-- High cloud cover (>50%) reduces confidence score
-- Confidence = 1.0 - (cloud_cover / 100)
-- Results still returned with confidence indicator
-
-## DynamoDB Schema
-
-### Satellite Image Cache
-
-```python
-{
-    'PK': 'FIELD#abc123',
-    'SK': 'SATELLITE#2024-01-15T10:30:00',
-    'entity_type': 'SatelliteImage',
-    'image_id': 'S2_20240115_103000',
-    'latitude': Decimal('19.0760'),
-    'longitude': Decimal('72.8777'),
-    'bands': {
-        'B4': 's3://bucket/sentinel2/B4.tif',
-        'B8': 's3://bucket/sentinel2/B8.tif'
-    },
-    'timestamp': '2024-01-15T10:30:00',
-    'cloud_cover': Decimal('15.5'),
-    'data_source': 'Sentinel-2',
-    'cached_at': '2024-01-15T10:30:00'
-}
-```
-
-### NDVI Result
-
-```python
-{
-    'PK': 'FIELD#abc123',
-    'SK': 'NDVI#2024-01-15T10:30:00',
-    'entity_type': 'NDVIResult',
-    'field_id': 'FIELD#abc123',
-    'latitude': Decimal('19.0760'),
-    'longitude': Decimal('72.8777'),
-    'ndvi_value': Decimal('0.65'),
-    'timestamp': '2024-01-15T10:30:00',
-    'confidence': Decimal('0.85'),
-    'satellite_image_url': 's3://bucket/image.tif',
-    'created_at': '2024-01-15T10:30:00'
-}
-```
-
-### Yield Prediction
-
-```python
-{
-    'PK': 'FIELD#abc123',
-    'SK': 'YIELD#2024-01-15T10:30:00',
-    'entity_type': 'YieldPrediction',
-    'field_id': 'FIELD#abc123',
-    'estimated_volume': Decimal('18.5'),
-    'confidence_lower': Decimal('15.7'),
-    'confidence_upper': Decimal('21.3'),
-    'maturity_stage': 'late',
-    'crop_type': 'onion',
-    'prediction_date': '2024-01-15T10:30:00',
-    'created_at': '2024-01-15T10:30:00'
-}
-```
+| Action | Input | Output |
+|--------|-------|--------|
+| `get_imagery` | `gps_coords`, `date_range` | Satellite image data |
+| `calculate_ndvi` | `gps_coords` | NDVI value + confidence |
+| `predict_yield` | `gps_coords`, `crop_type` | Yield estimate + maturity stage |
 
 ## Testing
 
-### Unit Tests
-
-Run unit tests:
 ```bash
 pytest tests/test_satellite_analyzer.py -v
-```
-
-Coverage:
-- GPS coordinate validation
-- Satellite imagery retrieval
-- NDVI calculation
-- Maturity stage classification
-- Yield prediction
-- Caching functionality
-- Error handling
-
-### Property-Based Tests
-
-Run property-based tests:
-```bash
 pytest tests/test_satellite_properties.py -v
 ```
-
-Properties tested:
-- **Property 7**: GPS-Based Imagery Retrieval (Requirement 3.1)
-- **Property 8**: NDVI Value Range Validity (Requirement 3.2)
-- **Property 9**: Maturity Stage Classification (Requirement 3.3)
-- **Property 10**: Yield Prediction Completeness (Requirements 3.4, 3.6)
-- **Property 28**: Satellite Data Caching (Requirement 9.5)
-
-## Requirements Validation
-
-| Requirement | Description | Status |
-|-------------|-------------|--------|
-| 3.1 | GPS-based satellite imagery retrieval | ✅ Implemented |
-| 3.2 | NDVI calculation | ✅ Implemented |
-| 3.3 | Crop maturity stage prediction | ✅ Implemented |
-| 3.4 | Yield volume estimation | ✅ Implemented |
-| 3.5 | Cloud cover handling | ✅ Implemented |
-| 3.6 | Confidence intervals | ✅ Implemented |
-| 9.5 | 24-hour caching | ✅ Implemented |
-
-## Future Enhancements
-
-1. **Real SageMaker Geospatial Integration**: Replace simulated API calls with actual SageMaker Geospatial API
-2. **ML-Based Yield Prediction**: Train ML models on historical data for more accurate predictions
-3. **Multi-Temporal Analysis**: Analyze NDVI trends over entire growing season
-4. **Additional Indices**: Support SAVI, EVI, NDWI for comprehensive crop monitoring
-5. **Weather Integration**: Incorporate weather data for improved predictions
-6. **Field Boundary Detection**: Automatic field boundary extraction from imagery
-7. **Crop Type Classification**: Automatic crop type identification from satellite data
-
-## References
-
-- [Sentinel-2 Mission](https://sentinel.esa.int/web/sentinel/missions/sentinel-2)
-- [NDVI Explained](https://gisgeography.com/ndvi-normalized-difference-vegetation-index/)
-- [AWS SageMaker Geospatial](https://aws.amazon.com/sagemaker/geospatial/)

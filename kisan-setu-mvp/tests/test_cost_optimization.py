@@ -29,14 +29,13 @@ class TestCacheManager:
     
     def test_cache_manager_initialization(self):
         """Test CacheManager initializes correctly."""
-        cache = CacheManager(redis_endpoint='', ttl_seconds=3600)
+        cache = CacheManager(ttl_seconds=3600)
         assert cache.ttl_seconds == 3600
-        assert cache.redis_client is None  # No Redis endpoint
         assert isinstance(cache.in_memory_cache, dict)
     
     def test_in_memory_cache_set_get(self):
         """Test in-memory cache set and get operations."""
-        cache = CacheManager(redis_endpoint='', ttl_seconds=10)
+        cache = CacheManager(ttl_seconds=10)
         
         # Set value
         result = cache.set('test_key', 'test_value')
@@ -48,7 +47,7 @@ class TestCacheManager:
     
     def test_in_memory_cache_expiry(self):
         """Test in-memory cache expiry."""
-        cache = CacheManager(redis_endpoint='', ttl_seconds=1)
+        cache = CacheManager(ttl_seconds=1)
         
         # Set value with 1 second TTL
         cache.set('test_key', 'test_value')
@@ -64,14 +63,14 @@ class TestCacheManager:
     
     def test_cache_miss(self):
         """Test cache miss returns None."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         value = cache.get('nonexistent_key')
         assert value is None
     
     def test_cache_delete(self):
         """Test cache delete operation."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         # Set and verify
         cache.set('test_key', 'test_value')
@@ -86,7 +85,7 @@ class TestCacheManager:
     
     def test_generate_cache_key(self):
         """Test cache key generation."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         # Simple key
         key1 = cache.generate_cache_key('prefix', 'arg1', 'arg2')
@@ -277,7 +276,7 @@ class TestGetCachedOrCompute:
     
     def test_cache_hit(self):
         """Test cache hit returns cached value."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         # Pre-populate cache
         cache.set('test_key', json.dumps({'value': 42}))
@@ -297,7 +296,7 @@ class TestGetCachedOrCompute:
     
     def test_cache_miss(self):
         """Test cache miss computes and caches value."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         compute_called = [False]
         
@@ -319,7 +318,7 @@ class TestGetCachedOrCompute:
     
     def test_custom_serialization(self):
         """Test custom serialization functions."""
-        cache = CacheManager(redis_endpoint='')
+        cache = CacheManager()
         
         def compute_func():
             return datetime(2024, 1, 1, 12, 0, 0)

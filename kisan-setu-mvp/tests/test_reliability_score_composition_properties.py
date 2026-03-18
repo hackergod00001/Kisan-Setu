@@ -494,7 +494,7 @@ def test_edge_case_maximum_score():
             'timestamp': (base_date + timedelta(days=i*7)).isoformat(),
             'ledger_image_url': 's3://test/image.jpg',
             'sync_status': 'SYNCED',
-            'status': 'fulfilled',
+            'status': 'completed',
             'payment_status': 'timely'
         }
         transactions.append(txn)

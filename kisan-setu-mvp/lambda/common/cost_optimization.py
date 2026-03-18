@@ -4,7 +4,7 @@ Implements batching, caching, and concurrent processing for cost efficiency.
 
 This module provides:
 - Request batching for Textract calls (batch size: 10)
-- Redis/ElastiCache caching layer for satellite imagery (24-hour TTL)
+- In-memory caching layer for satellite imagery (24-hour TTL)
 - Batch processing with ThreadPoolExecutor for concurrent operations
 """
 
@@ -18,20 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
 
-# Try to import redis, fall back to in-memory cache if not available
-try:
-    import redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
-    print("Warning: redis-py not available, using in-memory cache")
-
 # AWS clients
 textract = boto3.client('textract')
 
 # Environment variables
-REDIS_ENDPOINT = os.environ.get('REDIS_ENDPOINT', '')
-REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
 CACHE_TTL_SECONDS = int(os.environ.get('CACHE_TTL_SECONDS', str(24 * 3600)))  # 24 hours
 BATCH_SIZE = int(os.environ.get('TEXTRACT_BATCH_SIZE', '10'))
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '5'))
@@ -51,48 +41,20 @@ class BatchResult:
 
 class CacheManager:
     """
-    Caching layer for satellite imagery and other expensive operations.
+    In-memory caching layer for satellite imagery and other expensive operations.
     
-    Uses Redis/ElastiCache when available, falls back to in-memory cache.
-    Implements 24-hour TTL for cached data.
+    Implements 24-hour TTL for cached data using an in-memory dictionary.
     """
     
-    def __init__(
-        self,
-        redis_endpoint: str = REDIS_ENDPOINT,
-        redis_port: int = REDIS_PORT,
-        ttl_seconds: int = CACHE_TTL_SECONDS
-    ):
+    def __init__(self, ttl_seconds: int = CACHE_TTL_SECONDS):
         """
         Initialize CacheManager.
         
         Args:
-            redis_endpoint: Redis/ElastiCache endpoint
-            redis_port: Redis port
             ttl_seconds: Cache TTL in seconds (default 24 hours)
         """
         self.ttl_seconds = ttl_seconds
-        self.redis_client = None
-        self.in_memory_cache = {}  # Fallback cache
-        
-        # Try to connect to Redis
-        if REDIS_AVAILABLE and redis_endpoint:
-            try:
-                self.redis_client = redis.Redis(
-                    host=redis_endpoint,
-                    port=redis_port,
-                    decode_responses=True,
-                    socket_connect_timeout=2,
-                    socket_timeout=2
-                )
-                # Test connection
-                self.redis_client.ping()
-                print(f"Connected to Redis at {redis_endpoint}:{redis_port}")
-            except Exception as e:
-                print(f"Failed to connect to Redis: {str(e)}, using in-memory cache")
-                self.redis_client = None
-        else:
-            print("Redis not configured, using in-memory cache")
+        self.in_memory_cache = {}
     
     def get(self, key: str) -> Optional[str]:
         """
@@ -105,22 +67,14 @@ class CacheManager:
             Cached value or None if not found/expired
         """
         try:
-            if self.redis_client:
-                # Use Redis
-                value = self.redis_client.get(key)
-                if value:
-                    print(f"Cache HIT (Redis): {key}")
-                    return value
-            else:
-                # Use in-memory cache
-                if key in self.in_memory_cache:
-                    cached_data, expiry = self.in_memory_cache[key]
-                    if datetime.utcnow() < expiry:
-                        print(f"Cache HIT (memory): {key}")
-                        return cached_data
-                    else:
-                        # Expired, remove from cache
-                        del self.in_memory_cache[key]
+            if key in self.in_memory_cache:
+                cached_data, expiry = self.in_memory_cache[key]
+                if datetime.utcnow() < expiry:
+                    print(f"Cache HIT (memory): {key}")
+                    return cached_data
+                else:
+                    # Expired, remove from cache
+                    del self.in_memory_cache[key]
             
             print(f"Cache MISS: {key}")
             return None
@@ -144,17 +98,10 @@ class CacheManager:
         ttl = ttl or self.ttl_seconds
         
         try:
-            if self.redis_client:
-                # Use Redis with TTL
-                self.redis_client.setex(key, ttl, value)
-                print(f"Cached in Redis: {key} (TTL: {ttl}s)")
-                return True
-            else:
-                # Use in-memory cache with expiry
-                expiry = datetime.utcnow() + timedelta(seconds=ttl)
-                self.in_memory_cache[key] = (value, expiry)
-                print(f"Cached in memory: {key} (TTL: {ttl}s)")
-                return True
+            expiry = datetime.utcnow() + timedelta(seconds=ttl)
+            self.in_memory_cache[key] = (value, expiry)
+            print(f"Cached in memory: {key} (TTL: {ttl}s)")
+            return True
                 
         except Exception as e:
             print(f"Cache set error: {str(e)}")
@@ -171,11 +118,8 @@ class CacheManager:
             True if successful, False otherwise
         """
         try:
-            if self.redis_client:
-                self.redis_client.delete(key)
-            else:
-                if key in self.in_memory_cache:
-                    del self.in_memory_cache[key]
+            if key in self.in_memory_cache:
+                del self.in_memory_cache[key]
             
             print(f"Deleted from cache: {key}")
             return True

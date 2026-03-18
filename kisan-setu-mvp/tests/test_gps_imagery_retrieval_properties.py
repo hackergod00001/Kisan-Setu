@@ -68,9 +68,22 @@ def test_property_7_gps_based_imagery_retrieval(coords, days_back):
     
     # Create mock SageMaker client that returns valid imagery
     mock_sagemaker = Mock()
+    mock_sagemaker.search_raster_data_collection.return_value = {
+        'Items': [{
+            'Id': f'S2_TEST_{abs(hash((latitude, longitude)))}',
+            'DateTime': datetime.utcnow().isoformat() + 'Z',
+            'Properties': {'EoCloudCover': 10.0},
+            'Assets': {
+                'red': {'Href': 's3://sentinel-cogs/B4.tif'},
+                'nir': {'Href': 's3://sentinel-cogs/B8.tif'},
+                'green': {'Href': 's3://sentinel-cogs/B3.tif'},
+                'blue': {'Href': 's3://sentinel-cogs/B2.tif'},
+            }
+        }]
+    }
     mock_s3 = Mock()
     mock_table = Mock()
-    
+
     # Mock DynamoDB query to return no cached data
     mock_table.query.return_value = {'Items': []}
     
@@ -186,17 +199,31 @@ def test_property_7_invalid_coordinates_handling(coords):
     """
     latitude, longitude = coords
     
-    # Create analyzer
+    # Create analyzer with properly mocked sagemaker client
+    mock_sagemaker = Mock()
+    mock_sagemaker.search_raster_data_collection.return_value = {
+        'Items': [{
+            'Id': f'S2_TEST_{abs(hash((latitude, longitude)))}',
+            'DateTime': datetime.utcnow().isoformat() + 'Z',
+            'Properties': {'EoCloudCover': 10.0},
+            'Assets': {
+                'red': {'Href': 's3://sentinel-cogs/B4.tif'},
+                'nir': {'Href': 's3://sentinel-cogs/B8.tif'},
+                'green': {'Href': 's3://sentinel-cogs/B3.tif'},
+                'blue': {'Href': 's3://sentinel-cogs/B2.tif'},
+            }
+        }]
+    }
     analyzer = SatelliteAnalyzer(
-        sagemaker_client=Mock(),
+        sagemaker_client=mock_sagemaker,
         s3_client=Mock(),
         dynamodb_table=Mock()
     )
-    
+
     # Test with date range
     end_date = date.today()
     start_date = end_date - timedelta(days=7)
-    
+
     # Valid coordinates should not raise ValueError for invalid GPS
     if -90 <= latitude <= 90 and -180 <= longitude <= 180:
         # These are valid, so we expect either success or a different error
@@ -230,11 +257,25 @@ def test_property_7_coordinate_boundary_values(latitude, longitude):
     coords = (latitude, longitude)
     
     # Create analyzer with mocked dependencies
+    mock_sagemaker = Mock()
+    mock_sagemaker.search_raster_data_collection.return_value = {
+        'Items': [{
+            'Id': f'S2_TEST_{abs(hash((latitude, longitude)))}',
+            'DateTime': datetime.utcnow().isoformat() + 'Z',
+            'Properties': {'EoCloudCover': 10.0},
+            'Assets': {
+                'red': {'Href': 's3://sentinel-cogs/B4.tif'},
+                'nir': {'Href': 's3://sentinel-cogs/B8.tif'},
+                'green': {'Href': 's3://sentinel-cogs/B3.tif'},
+                'blue': {'Href': 's3://sentinel-cogs/B2.tif'},
+            }
+        }]
+    }
     mock_table = Mock()
     mock_table.query.return_value = {'Items': []}
-    
+
     analyzer = SatelliteAnalyzer(
-        sagemaker_client=Mock(),
+        sagemaker_client=mock_sagemaker,
         s3_client=Mock(),
         dynamodb_table=mock_table
     )
