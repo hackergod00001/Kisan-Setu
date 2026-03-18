@@ -20,6 +20,13 @@ import os
 # Add lambda directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lambda'))
 
+# Check if rasterio is available (required for NDVI computation tests)
+try:
+    import rasterio
+    RASTERIO_AVAILABLE = True
+except ImportError:
+    RASTERIO_AVAILABLE = False
+
 from satellite.satellite_analyzer import (
     SatelliteAnalyzer,
     SatelliteImage,
@@ -575,6 +582,10 @@ class TestSatelliteAnalyzer:
 
     # ==================== NDVI Heatmap Tests ====================
 
+    @pytest.mark.skipif(
+        not RASTERIO_AVAILABLE,
+        reason="rasterio library required for NDVI computation (available in Lambda Layer only)"
+    )
     def test_compute_ndvi_array_returns_2d_array(self, analyzer):
         """Test that _compute_ndvi_array returns a 2D numpy array of correct shape."""
         import numpy as np

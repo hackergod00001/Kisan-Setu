@@ -623,6 +623,16 @@ Respond ONLY with JSON: {{"crop_type": "...", "quantity": "...", "price": "...",
             if isinstance(field_value, (int, float)) and field_value == 0:
                 validation_result.missing_fields.append(field)
                 validation_result.is_valid = False
+                # Still check confidence score even for missing/zero values
+                # This handles cases where a field was reset due to low confidence
+                # If field has a confidence score recorded (even if 0), flag it as low confidence
+                if field in ledger_data.confidence_scores:
+                    confidence = ledger_data.confidence_scores[field]
+                    if confidence < self.confidence_threshold:
+                        if field not in validation_result.low_confidence_fields:
+                            validation_result.low_confidence_fields.append(field)
+                        if field not in validation_result.fields_needing_review:
+                            validation_result.fields_needing_review.append(field)
                 continue
             # Special check: crop_type must be a real crop name
             if field == 'CROP_TYPE' and str(field_value).lower() in ('unknown', 'yes', 'no', 'none', 'n/a'):

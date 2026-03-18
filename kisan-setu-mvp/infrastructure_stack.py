@@ -500,6 +500,8 @@ class KisanSetuMVPStack(Stack):
                 "WEBHOOK_VERIFY_TOKEN": "kisan-setu-verify-2026",
                 "PROCESSOR_FUNCTION_NAME": processor_lambda.function_name,
                 "VOICE_AGENT_FUNCTION": voice_lambda.function_name,
+                "CREDIT_CALCULATOR_FUNCTION": credit_lambda.function_name,
+                "SATELLITE_ANALYZER_FUNCTION": satellite_lambda.function_name,
                 "BEDROCK_ORCHESTRATOR_FUNCTION": orchestrator_lambda.function_name,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "KMS_KEY_ID": encryption_key.key_id
