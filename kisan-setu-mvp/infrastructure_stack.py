@@ -1027,8 +1027,8 @@ $util.toJson($ctx.result)
         CfnOutput(
             self, "SNSAlertTopicArn",
             value=alert_topic.topic_arn,
-            description="SNS Topic ARN for critical error alerts",
-            export_name="KisanSetuAlertTopicArn"
+            description=f"SNS Topic ARN for critical error alerts ({environment})",
+            export_name=f"KisanSetu{env_prefix.replace('-', '')}AlertTopicArn"
         )
 
     def _create_lambda_role(self, name, extra_policies=None):
