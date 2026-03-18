@@ -325,7 +325,25 @@ class KisanSetuMVPStack(Stack):
         sync_role = self._create_lambda_role("SyncHandler", [
             dynamodb_rw_policy, sns_policy, kms_policy,
         ])
-        
+
+        # Common Library Lambda Layer (shared code for all Lambda functions)
+        # Built with correct Python path structure: python/lib/python3.11/site-packages/common/
+        common_layer = lambda_.LayerVersion(
+            self, "CommonLibraryLayer",
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "lambda/.layer-build")),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_11, lambda_.Runtime.PYTHON_3_12],
+            description=f"Shared common library for Kisan-Setu ({environment}): DynamoDBAccess, models, validation",
+            layer_version_name=f"{env_prefix}kisan-setu-common"
+        )
+
+        # Geospatial Lambda Layer (rasterio, pyproj, numpy for real NDVI)
+        geospatial_layer = lambda_.LayerVersion(
+            self, "GeospatialLayer",
+            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "layers/geospatial")),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_11],
+            description="rasterio + pyproj + numpy for Sentinel-2 NDVI computation",
+        )
+
         # Document Processor Lambda (create first so we can reference it)
         processor_lambda = lambda_.Function(
             self, "DocumentProcessor",
@@ -335,6 +353,7 @@ class KisanSetuMVPStack(Stack):
             role=processor_role,
             timeout=Duration.seconds(60),
             memory_size=1024,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "S3_BUCKET_RAW": raw_bucket_name,
@@ -356,6 +375,7 @@ class KisanSetuMVPStack(Stack):
             role=voice_role,
             timeout=Duration.seconds(60),
             memory_size=512,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "S3_BUCKET_RAW": raw_bucket_name,
@@ -377,20 +397,13 @@ class KisanSetuMVPStack(Stack):
             role=credit_role,
             timeout=Duration.seconds(30),
             memory_size=512,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "KMS_KEY_ID": encryption_key.key_id
             }
-        )
-
-        # Geospatial Lambda Layer (rasterio, pyproj, numpy for real NDVI)
-        geospatial_layer = lambda_.LayerVersion(
-            self, "GeospatialLayer",
-            code=lambda_.Code.from_asset(os.path.join(STACK_DIR, "layers/geospatial")),
-            compatible_runtimes=[lambda_.Runtime.PYTHON_3_11],
-            description="rasterio + pyproj + numpy for Sentinel-2 NDVI computation",
         )
 
         # Satellite Analyzer Lambda
@@ -402,7 +415,7 @@ class KisanSetuMVPStack(Stack):
             role=satellite_role,
             timeout=Duration.seconds(120),
             memory_size=2048,
-            layers=[geospatial_layer],
+            layers=[common_layer, geospatial_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "S3_BUCKET_RAW": raw_bucket_name,
@@ -424,6 +437,7 @@ class KisanSetuMVPStack(Stack):
             role=knowledge_role,
             timeout=Duration.seconds(60),
             memory_size=512,
+            layers=[common_layer],
             environment={
                 "REGION": region,
                 "KNOWLEDGE_BASE_ID": "",  # REQUIRED: Set after running setup_knowledge_base.py — Lambda will fail-fast without this
@@ -444,6 +458,7 @@ class KisanSetuMVPStack(Stack):
             role=orchestrator_role,
             timeout=Duration.seconds(180),
             memory_size=1024,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "S3_BUCKET_RAW": raw_bucket_name,
@@ -474,6 +489,7 @@ class KisanSetuMVPStack(Stack):
             role=router_role,
             timeout=Duration.seconds(30),
             memory_size=512,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "S3_BUCKET_RAW": raw_bucket_name,
@@ -490,19 +506,19 @@ class KisanSetuMVPStack(Stack):
             }
         )
 
-        # Provisioned concurrency for Router and Orchestrator
+        # Provisioned concurrency for Router and Orchestrator (disabled for dev to avoid deployment issues)
         router_version = router_lambda.current_version
         router_alias = lambda_.Alias(self, "RouterAlias",
             alias_name="live",
             version=router_version,
-            provisioned_concurrent_executions=2,
+            provisioned_concurrent_executions=2 if environment == "prod" else 0,
         )
 
         orchestrator_version = orchestrator_lambda.current_version
         orchestrator_alias = lambda_.Alias(self, "OrchestratorAlias",
             alias_name="live",
             version=orchestrator_version,
-            provisioned_concurrent_executions=2,
+            provisioned_concurrent_executions=2 if environment == "prod" else 0,
         )
 
         # API Gateway
@@ -795,6 +811,7 @@ $util.toJson($ctx.result)
             role=sync_role,
             timeout=Duration.seconds(60),
             memory_size=512,
+            layers=[common_layer],
             environment={
                 "DYNAMODB_TABLE": table_name,
                 "REGION": region,

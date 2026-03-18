@@ -17,11 +17,12 @@ from .models import (
     NDVIResult, Message, AuditTrail, SyncStatus
 )
 from .validation import validate_gps_coordinates, validate_phone_number
+from .encryption import encrypt_sensitive_fields, decrypt_sensitive_fields, SENSITIVE_FIELDS
 
 
 # Initialize DynamoDB resource
 dynamodb = boto3.resource('dynamodb')
-table_name = os.environ.get('DYNAMODB_TABLE_NAME', 'KisanSetuData')
+table_name = os.environ.get('DYNAMODB_TABLE', 'KisanSetuData')
 table = dynamodb.Table(table_name)
 
 
@@ -35,7 +36,7 @@ class DynamoDBAccess:
         Args:
             table_name: Optional table name override
         """
-        self.table_name = table_name or os.environ.get('DYNAMODB_TABLE_NAME', 'KisanSetuData')
+        self.table_name = table_name or os.environ.get('DYNAMODB_TABLE', 'KisanSetuData')
         self.table = dynamodb.Table(self.table_name)
     
     # ==================== FPO Operations ====================
@@ -154,6 +155,12 @@ class DynamoDBAccess:
                 'updated_at': datetime.utcnow().isoformat()
             }
             
+            # Encrypt sensitive fields before writing
+            try:
+                item = encrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('Farmer', []))
+            except Exception as enc_err:
+                print(f"Encryption unavailable, storing plaintext: {enc_err}")
+            
             self.table.put_item(Item=item)
             
             # Create GSI-1 entry for querying farmers by FPO
@@ -201,6 +208,11 @@ class DynamoDBAccess:
                 return None
             
             item = response['Item']
+            # Decrypt sensitive fields (handles both encrypted and legacy plaintext)
+            try:
+                item = decrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('Farmer', []))
+            except Exception as dec_err:
+                print(f"Decryption unavailable, returning as-is: {dec_err}")
             return Farmer(
                 farmer_id=item['farmer_id'],
                 name=item['name'],
@@ -280,6 +292,12 @@ class DynamoDBAccess:
             if transaction.ledger_image_url:
                 item['ledger_image_url'] = transaction.ledger_image_url
             
+            # Encrypt sensitive fields before writing
+            try:
+                item = encrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('Transaction', []))
+            except Exception as enc_err:
+                print(f"Encryption unavailable, storing plaintext: {enc_err}")
+            
             self.table.put_item(Item=item)
             
             # Create GSI-2 entry for querying transactions by FPO and date
@@ -327,6 +345,11 @@ class DynamoDBAccess:
             )
             
             for item in response.get('Items', []):
+                # Decrypt sensitive fields (handles both encrypted and legacy plaintext)
+                try:
+                    item = decrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('Transaction', []))
+                except Exception as dec_err:
+                    print(f"Decryption unavailable, returning as-is: {dec_err}")
                 transactions.append(Transaction(
                     transaction_id=item['transaction_id'],
                     farmer_id=item['farmer_id'],
@@ -427,6 +450,12 @@ class DynamoDBAccess:
                 'updated_at': datetime.utcnow().isoformat()
             }
             
+            # Encrypt sensitive fields before writing
+            try:
+                item = encrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('ReliabilityScore', []))
+            except Exception as enc_err:
+                print(f"Encryption unavailable, storing plaintext: {enc_err}")
+            
             self.table.put_item(Item=item)
             
             # Create audit trail
@@ -466,6 +495,11 @@ class DynamoDBAccess:
                 return None
             
             item = items[0]
+            # Decrypt sensitive fields (handles both encrypted and legacy plaintext)
+            try:
+                item = decrypt_sensitive_fields(item, SENSITIVE_FIELDS.get('ReliabilityScore', []))
+            except Exception as dec_err:
+                print(f"Decryption unavailable, returning as-is: {dec_err}")
             return ReliabilityScore(
                 farmer_id=item['farmer_id'],
                 total_score=float(item['total_score']),
