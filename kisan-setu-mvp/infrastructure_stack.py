@@ -31,75 +31,139 @@ import os
 STACK_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class KisanSetuMVPStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, environment: str = "dev", **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
-        
+
         account_id = self.account
         region = self.region
-        
-        # Reference existing DynamoDB table
-        #
-        # IMPORTANT — DynamoDB TTL Configuration:
-        # TTL must be enabled on the 'KisanSetuData' table for the 'ttl'
-        # attribute. This is required for automatic cleanup of old conversation
-        # items written by the Orchestrator Lambda (see orchestrator.py).
-        # Because the table is imported via from_table_name (not created by
-        # this stack), TTL must be enabled manually:
-        #
-        #   aws dynamodb update-time-to-live --table-name KisanSetuData \
-        #     --time-to-live-specification "Enabled=true, AttributeName=ttl"
-        #
-        # If the table were created by CDK instead, you would set:
-        #   time_to_live_attribute='ttl'
-        # in the dynamodb.Table() constructor.
-        table = dynamodb.Table.from_table_name(
-            self, "KisanSetuTable",
-            table_name="KisanSetuData"
-        )
-        
-        # Enable Point-in-Time Recovery via AwsCustomResource
-        # (Table is imported via from_table_name, so PITR can't be set declaratively)
-        cr.AwsCustomResource(self, "EnablePITR",
-            on_create=cr.AwsSdkCall(
-                service="DynamoDB",
-                action="updateContinuousBackups",
-                parameters={
-                    "TableName": "KisanSetuData",
-                    "PointInTimeRecoverySpecification": {
-                        "PointInTimeRecoveryEnabled": True
-                    }
-                },
-                physical_resource_id=cr.PhysicalResourceId.of("KisanSetuData-PITR"),
-            ),
-            policy=cr.AwsCustomResourcePolicy.from_statements([
-                iam.PolicyStatement(
-                    actions=["dynamodb:UpdateContinuousBackups", "dynamodb:DescribeContinuousBackups"],
-                    resources=[f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData"]
+
+        # Environment-specific resource naming
+        # - prod: Uses existing resource names (no prefix) for backward compatibility
+        # - dev/staging: Uses prefixed names for isolation
+        env_prefix = "" if environment == "prod" else f"{environment}-"
+
+        # DynamoDB table name with environment prefix
+        table_name = f"{env_prefix}KisanSetuData"
+
+        # Reference existing DynamoDB table (prod) or create new table (dev/staging)
+        if environment == "prod":
+            # Production: Reference existing table
+            # IMPORTANT — DynamoDB TTL Configuration:
+            # TTL must be enabled on the 'KisanSetuData' table for the 'ttl'
+            # attribute. This is required for automatic cleanup of old conversation
+            # items written by the Orchestrator Lambda (see orchestrator.py).
+            # Because the table is imported via from_table_name (not created by
+            # this stack), TTL must be enabled manually:
+            #
+            #   aws dynamodb update-time-to-live --table-name KisanSetuData \
+            #     --time-to-live-specification "Enabled=true, AttributeName=ttl"
+            table = dynamodb.Table.from_table_name(
+                self, "KisanSetuTable",
+                table_name=table_name
+            )
+        else:
+            # Dev/Staging: Create new table with CDK management
+            table = dynamodb.Table(
+                self, "KisanSetuTable",
+                table_name=table_name,
+                partition_key=dynamodb.Attribute(
+                    name="PK",
+                    type=dynamodb.AttributeType.STRING
+                ),
+                sort_key=dynamodb.Attribute(
+                    name="SK",
+                    type=dynamodb.AttributeType.STRING
+                ),
+                billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+                time_to_live_attribute="ttl",  # Automatically enabled for new tables
+                point_in_time_recovery=True,
+                removal_policy=RemovalPolicy.DESTROY  # Safe to delete dev/staging tables
+            )
+
+            # Add GSI for querying by farmerPhone
+            table.add_global_secondary_index(
+                index_name="farmerPhone-index",
+                partition_key=dynamodb.Attribute(
+                    name="farmerPhone",
+                    type=dynamodb.AttributeType.STRING
                 )
-            ])
-        )
+            )
         
-        # Reference existing S3 buckets
-        raw_bucket = s3.Bucket.from_bucket_name(
-            self, "RawBucket",
-            bucket_name=f"kisan-setu-raw-{account_id}"
-        )
-        
-        processed_bucket = s3.Bucket.from_bucket_name(
-            self, "ProcessedBucket",
-            bucket_name=f"kisan-setu-processed-{account_id}"
-        )
-        
-        archive_bucket = s3.Bucket.from_bucket_name(
-            self, "ArchiveBucket",
-            bucket_name=f"kisan-setu-archive-{account_id}"
-        )
+        # Enable Point-in-Time Recovery via AwsCustomResource (prod only)
+        # (Dev/staging tables have PITR enabled declaratively above)
+        if environment == "prod":
+            cr.AwsCustomResource(self, "EnablePITR",
+                on_create=cr.AwsSdkCall(
+                    service="DynamoDB",
+                    action="updateContinuousBackups",
+                    parameters={
+                        "TableName": table_name,
+                        "PointInTimeRecoverySpecification": {
+                            "PointInTimeRecoveryEnabled": True
+                        }
+                    },
+                    physical_resource_id=cr.PhysicalResourceId.of(f"{table_name}-PITR"),
+                ),
+                policy=cr.AwsCustomResourcePolicy.from_statements([
+                    iam.PolicyStatement(
+                        actions=["dynamodb:UpdateContinuousBackups", "dynamodb:DescribeContinuousBackups"],
+                        resources=[f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}"]
+                    )
+                ])
+            )
+
+        # S3 bucket names with environment prefix
+        raw_bucket_name = f"kisan-setu-{env_prefix}raw-{account_id}"
+        processed_bucket_name = f"kisan-setu-{env_prefix}processed-{account_id}"
+        archive_bucket_name = f"kisan-setu-{env_prefix}archive-{account_id}"
+
+        # Reference existing S3 buckets (prod) or create new ones (dev/staging)
+        if environment == "prod":
+            raw_bucket = s3.Bucket.from_bucket_name(
+                self, "RawBucket",
+                bucket_name=raw_bucket_name
+            )
+
+            processed_bucket = s3.Bucket.from_bucket_name(
+                self, "ProcessedBucket",
+                bucket_name=processed_bucket_name
+            )
+
+            archive_bucket = s3.Bucket.from_bucket_name(
+                self, "ArchiveBucket",
+                bucket_name=archive_bucket_name
+            )
+        else:
+            # Dev/Staging: Create new S3 buckets
+            raw_bucket = s3.Bucket(
+                self, "RawBucket",
+                bucket_name=raw_bucket_name,
+                encryption=s3.BucketEncryption.S3_MANAGED,
+                removal_policy=RemovalPolicy.DESTROY,
+                auto_delete_objects=True  # Safe to delete dev/staging data
+            )
+
+            processed_bucket = s3.Bucket(
+                self, "ProcessedBucket",
+                bucket_name=processed_bucket_name,
+                encryption=s3.BucketEncryption.S3_MANAGED,
+                removal_policy=RemovalPolicy.DESTROY,
+                auto_delete_objects=True
+            )
+
+            archive_bucket = s3.Bucket(
+                self, "ArchiveBucket",
+                bucket_name=archive_bucket_name,
+                encryption=s3.BucketEncryption.S3_MANAGED,
+                removal_policy=RemovalPolicy.DESTROY,
+                auto_delete_objects=True
+            )
         
         # SNS Topic for Critical Error Alerts
         alert_topic = sns.Topic(
             self, "CriticalAlertTopic",
-            topic_name="kisan-setu-critical-alerts",
-            display_name="Kisan-Setu Critical Error Alerts"
+            topic_name=f"kisan-setu-{env_prefix}critical-alerts",
+            display_name=f"Kisan-Setu Critical Error Alerts ({environment})"
         )
         
         # SNS email subscription via CDK context parameter
@@ -113,15 +177,15 @@ class KisanSetuMVPStack(Stack):
         # KMS Key for encrypting sensitive DynamoDB fields
         encryption_key = kms.Key(
             self, "SensitiveDataEncryptionKey",
-            alias="kisan-setu/sensitive-data",
-            description="KMS key for encrypting sensitive DynamoDB fields (phone, price, financial scores)",
+            alias=f"kisan-setu/{env_prefix}sensitive-data",
+            description=f"KMS key for encrypting sensitive DynamoDB fields ({environment})",
             enable_key_rotation=True,
-            removal_policy=RemovalPolicy.RETAIN
+            removal_policy=RemovalPolicy.DESTROY if environment != "prod" else RemovalPolicy.RETAIN
         )
-        
+
         # --- Common policy statement builders ---
-        dynamodb_table_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData"
-        dynamodb_index_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/KisanSetuData/index/*"
+        dynamodb_table_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}"
+        dynamodb_index_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}/index/*"
 
         s3_bucket_arns = [
             raw_bucket.bucket_arn,
@@ -163,7 +227,7 @@ class KisanSetuMVPStack(Stack):
 
         secrets_policy = iam.PolicyStatement(
             actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-            resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:kisan-setu/*"],
+            resources=[f"arn:aws:secretsmanager:{region}:{account_id}:secret:kisan-setu/{env_prefix}*"],
         )
 
         lambda_invoke_policy = iam.PolicyStatement(
@@ -272,13 +336,13 @@ class KisanSetuMVPStack(Stack):
             timeout=Duration.seconds(60),
             memory_size=1024,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
-                "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
-                "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
-                "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
+                "DYNAMODB_TABLE": table_name,
+                "S3_BUCKET_RAW": raw_bucket_name,
+                "S3_BUCKET_PROCESSED": processed_bucket_name,
+                "S3_BUCKET_ARCHIVE": archive_bucket_name,
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "WHATSAPP_SECRET_NAME": f"kisan-setu/{env_prefix}whatsapp/credentials",
                 "KMS_KEY_ID": encryption_key.key_id
             }
         )
@@ -293,13 +357,13 @@ class KisanSetuMVPStack(Stack):
             timeout=Duration.seconds(60),
             memory_size=512,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
-                "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
-                "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
-                "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
+                "DYNAMODB_TABLE": table_name,
+                "S3_BUCKET_RAW": raw_bucket_name,
+                "S3_BUCKET_PROCESSED": processed_bucket_name,
+                "S3_BUCKET_ARCHIVE": archive_bucket_name,
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "WHATSAPP_SECRET_NAME": f"kisan-setu/{env_prefix}whatsapp/credentials",
                 "KMS_KEY_ID": encryption_key.key_id
             }
         )
@@ -314,7 +378,7 @@ class KisanSetuMVPStack(Stack):
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
+                "DYNAMODB_TABLE": table_name,
                 "REGION": region,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "KMS_KEY_ID": encryption_key.key_id
@@ -340,9 +404,9 @@ class KisanSetuMVPStack(Stack):
             memory_size=2048,
             layers=[geospatial_layer],
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
-                "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
-                "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
+                "DYNAMODB_TABLE": table_name,
+                "S3_BUCKET_RAW": raw_bucket_name,
+                "S3_BUCKET_PROCESSED": processed_bucket_name,
                 "REGION": region,
                 "SAGEMAKER_REGION": "us-west-2",
                 "SENTINEL2_ARN": "arn:aws:sagemaker-geospatial:us-west-2:378778860802:raster-data-collection/public/nmqj48dcu3g7ayw8",
@@ -365,12 +429,12 @@ class KisanSetuMVPStack(Stack):
                 "KNOWLEDGE_BASE_ID": "",  # REQUIRED: Set after running setup_knowledge_base.py — Lambda will fail-fast without this
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "KMS_KEY_ID": encryption_key.key_id,
-                "DYNAMODB_TABLE": "KisanSetuData"
+                "DYNAMODB_TABLE": table_name
             }
         )
         
         # Bedrock Orchestrator Lambda — explicit function_name to break circular dependency with VoiceHandler
-        orchestrator_function_name = "KisanSetu-BedrockOrchestrator"
+        orchestrator_function_name = f"{env_prefix}KisanSetu-BedrockOrchestrator"
         orchestrator_lambda = lambda_.Function(
             self, "BedrockOrchestrator",
             function_name=orchestrator_function_name,
@@ -381,8 +445,8 @@ class KisanSetuMVPStack(Stack):
             timeout=Duration.seconds(180),
             memory_size=1024,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
-                "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
+                "DYNAMODB_TABLE": table_name,
+                "S3_BUCKET_RAW": raw_bucket_name,
                 "REGION": region,
                 "DOCUMENT_PROCESSOR_FUNCTION": processor_lambda.function_name,
                 "VOICE_AGENT_FUNCTION": voice_lambda.function_name,
@@ -390,7 +454,7 @@ class KisanSetuMVPStack(Stack):
                 "CREDIT_CALCULATOR_FUNCTION": credit_lambda.function_name,
                 "KNOWLEDGE_BASE_FUNCTION": knowledge_lambda.function_name,
                 "KNOWLEDGE_BASE_ID": "",  # REQUIRED: Set after running setup_knowledge_base.py
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "WHATSAPP_SECRET_NAME": f"kisan-setu/{env_prefix}whatsapp/credentials",
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "KMS_KEY_ID": encryption_key.key_id
             }
@@ -411,12 +475,12 @@ class KisanSetuMVPStack(Stack):
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
-                "S3_BUCKET_RAW": f"kisan-setu-raw-{account_id}",
-                "S3_BUCKET_PROCESSED": f"kisan-setu-processed-{account_id}",
-                "S3_BUCKET_ARCHIVE": f"kisan-setu-archive-{account_id}",
+                "DYNAMODB_TABLE": table_name,
+                "S3_BUCKET_RAW": raw_bucket_name,
+                "S3_BUCKET_PROCESSED": processed_bucket_name,
+                "S3_BUCKET_ARCHIVE": archive_bucket_name,
                 "REGION": region,
-                "WHATSAPP_SECRET_NAME": "kisan-setu/whatsapp/credentials",
+                "WHATSAPP_SECRET_NAME": f"kisan-setu/{env_prefix}whatsapp/credentials",
                 "WEBHOOK_VERIFY_TOKEN": "kisan-setu-verify-2026",
                 "PROCESSOR_FUNCTION_NAME": processor_lambda.function_name,
                 "VOICE_AGENT_FUNCTION": voice_lambda.function_name,
@@ -444,7 +508,7 @@ class KisanSetuMVPStack(Stack):
         # API Gateway
         api = apigw.RestApi(
             self, "KisanSetuAPI",
-            rest_api_name="Kisan-Setu WhatsApp Webhook",
+            rest_api_name=f"Kisan-Setu WhatsApp Webhook ({environment})",
             description="Webhook for WhatsApp Business API",
             deploy_options=apigw.StageOptions(
                 stage_name="prod",
@@ -492,14 +556,14 @@ class KisanSetuMVPStack(Stack):
         # API Key for authenticated endpoints (/process, /credit, /knowledge)
         api_key = api.add_api_key(
             "KisanSetuApiKey",
-            api_key_name="kisan-setu-api-key",
+            api_key_name=f"kisan-setu-{env_prefix}api-key",
             description="API key for Kisan-Setu authenticated endpoints"
         )
 
         # Usage plan to associate the API key with the API stage
         usage_plan = api.add_usage_plan(
             "KisanSetuUsagePlan",
-            name="kisan-setu-usage-plan",
+            name=f"kisan-setu-{env_prefix}usage-plan",
             description="Usage plan for Kisan-Setu API",
             throttle=apigw.ThrottleSettings(
                 rate_limit=100,
@@ -512,7 +576,7 @@ class KisanSetuMVPStack(Stack):
         # Cognito User Pool for AppSync authentication
         user_pool = cognito.UserPool(
             self, "KisanSetuUserPool",
-            user_pool_name="kisan-setu-user-pool",
+            user_pool_name=f"kisan-setu-{env_prefix}user-pool",
             self_sign_up_enabled=False,
             sign_in_aliases=cognito.SignInAliases(email=True),
             removal_policy=RemovalPolicy.DESTROY
@@ -521,7 +585,7 @@ class KisanSetuMVPStack(Stack):
         # Cognito User Pool Client for AppSync
         user_pool_client = user_pool.add_client(
             "KisanSetuUserPoolClient",
-            user_pool_client_name="kisan-setu-appsync-client",
+            user_pool_client_name=f"kisan-setu-{env_prefix}appsync-client",
             auth_flows=cognito.AuthFlow(
                 user_password=True,
                 user_srp=True
@@ -531,7 +595,7 @@ class KisanSetuMVPStack(Stack):
         # AppSync GraphQL API for offline sync
         graphql_api = appsync.GraphqlApi(
             self, "KisanSetuGraphQLAPI",
-            name="kisan-setu-sync-api",
+            name=f"kisan-setu-{env_prefix}sync-api",
             definition=appsync.Definition.from_file(
                 os.path.join(os.path.dirname(__file__), "schema.graphql")
             ),
@@ -732,7 +796,7 @@ $util.toJson($ctx.result)
             timeout=Duration.seconds(60),
             memory_size=512,
             environment={
-                "DYNAMODB_TABLE": "KisanSetuData",
+                "DYNAMODB_TABLE": table_name,
                 "REGION": region,
                 "KMS_KEY_ID": encryption_key.key_id,
                 "SNS_ALERT_TOPIC_ARN": alert_topic.topic_arn
@@ -812,7 +876,7 @@ $util.toJson($ctx.result)
                 threshold=0,
                 comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
                 evaluation_periods=1,
-                alarm_name=f"kisan-setu-{name}-errors",
+                alarm_name=f"kisan-setu-{env_prefix}{name}-errors",
             ).add_alarm_action(cw_actions.SnsAction(alert_topic))
 
             cloudwatch.Alarm(self, f"{name}ThrottleAlarm",
@@ -820,7 +884,7 @@ $util.toJson($ctx.result)
                 threshold=0,
                 comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
                 evaluation_periods=1,
-                alarm_name=f"kisan-setu-{name}-throttles",
+                alarm_name=f"kisan-setu-{env_prefix}{name}-throttles",
             ).add_alarm_action(cw_actions.SnsAction(alert_topic))
 
         # API Gateway 5xx alarm
@@ -829,7 +893,7 @@ $util.toJson($ctx.result)
             threshold=0,
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
             evaluation_periods=1,
-            alarm_name="kisan-setu-api-5xx",
+            alarm_name=f"kisan-setu-{env_prefix}api-5xx",
         ).add_alarm_action(cw_actions.SnsAction(alert_topic))
 
         # API Gateway p99 latency alarm
@@ -838,13 +902,13 @@ $util.toJson($ctx.result)
             threshold=10000,
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
             evaluation_periods=1,
-            alarm_name="kisan-setu-api-latency-p99",
+            alarm_name=f"kisan-setu-{env_prefix}api-latency-p99",
         ).add_alarm_action(cw_actions.SnsAction(alert_topic))
 
         # Dashboard S3 bucket (private, served via CloudFront)
         dashboard_bucket = s3.Bucket(
             self, "DashboardBucket",
-            bucket_name=f"kisan-setu-dashboard-{account_id}",
+            bucket_name=f"kisan-setu-{env_prefix}dashboard-{account_id}" if environment != "prod" else f"kisan-setu-dashboard-{account_id}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True
